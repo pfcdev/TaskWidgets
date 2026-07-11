@@ -7,55 +7,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$BuildScript = Join-Path $RepoRoot "scripts\build-product.ps1"
-$ArtifactDir = Join-Path $RepoRoot "artifacts\TaskbarStats"
-$Exe = Join-Path $ArtifactDir "TaskbarStats.exe"
-$Sha = Join-Path $ArtifactDir "TaskbarStats.exe.sha256"
-
-powershell -ExecutionPolicy Bypass -File $BuildScript -Configuration Release
-
-if (-not (Test-Path $Exe)) {
-    throw "Expected artifact not found: $Exe"
-}
-
-$Hash = (Get-FileHash $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
-Set-Content -Path $Sha -Value "$Hash  TaskbarStats.exe" -Encoding ASCII
-
-if (Get-Command gh -ErrorAction SilentlyContinue) {
-    $ReleaseExists = $false
-    try {
-        gh release view $Tag --repo $Repo *> $null
-        $ReleaseExists = $true
-    } catch {
-        $ReleaseExists = $false
+function Get-GitHubHeaders {
+    $CredentialInput = "protocol=https`nhost=github.com`n`n"
+    $CredentialOutput = $CredentialInput | git credential fill
+    $Map = @{}
+    foreach ($Line in $CredentialOutput) {
+        $Index = $Line.IndexOf("=")
+        if ($Index -gt 0) {
+            $Map[$Line.Substring(0, $Index)] = $Line.Substring($Index + 1)
+        }
     }
 
-    if ($ReleaseExists) {
-        gh release upload $Tag $Exe $Sha --repo $Repo --clobber
-    } else {
-        $Args = @(
-            "release", "create", $Tag,
-            $Exe, $Sha,
-            "--repo", $Repo,
-            "--title", "TaskbarStats $Tag",
-            "--notes", "TaskbarStats product build."
-        )
-        if ($Draft) {
-            $Args += "--draft"
-        }
-        if ($Prerelease) {
-            $Args += "--prerelease"
-        }
-
-        gh @Args
+    if (-not $Map.ContainsKey("username") -or -not $Map.ContainsKey("password")) {
+        throw "GitHub credentials were not available from git credential manager."
     }
-} else {
-    Write-Warning "GitHub CLI was not found. Falling back to GitHub REST API with git credential manager."
-    Publish-WithGitHubRest -Repo $Repo -Tag $Tag -Files @($Exe, $Sha) -Draft:$Draft -Prerelease:$Prerelease
-}
 
-Write-Host "Release asset uploaded: $Repo $Tag"
+    $Token = [Convert]::ToBase64String(
+        [Text.Encoding]::ASCII.GetBytes("$($Map["username"]):$($Map["password"])"))
+    return @{
+        Authorization = "Basic $Token"
+        Accept = "application/vnd.github+json"
+        "User-Agent" = "TaskbarStatsReleaseScript"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+}
 
 function Publish-WithGitHubRest {
     param(
@@ -126,27 +101,52 @@ function Publish-WithGitHubRest {
     }
 }
 
-function Get-GitHubHeaders {
-    $CredentialInput = "protocol=https`nhost=github.com`n`n"
-    $CredentialOutput = $CredentialInput | git credential fill
-    $Map = @{}
-    foreach ($Line in $CredentialOutput) {
-        $Index = $Line.IndexOf("=")
-        if ($Index -gt 0) {
-            $Map[$Line.Substring(0, $Index)] = $Line.Substring($Index + 1)
-        }
-    }
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$BuildScript = Join-Path $RepoRoot "scripts\build-product.ps1"
+$ArtifactDir = Join-Path $RepoRoot "artifacts\TaskbarStats"
+$Exe = Join-Path $ArtifactDir "TaskbarStats.exe"
+$Sha = Join-Path $ArtifactDir "TaskbarStats.exe.sha256"
 
-    if (-not $Map.ContainsKey("username") -or -not $Map.ContainsKey("password")) {
-        throw "GitHub credentials were not available from git credential manager."
-    }
+powershell -ExecutionPolicy Bypass -File $BuildScript -Configuration Release
 
-    $Token = [Convert]::ToBase64String(
-        [Text.Encoding]::ASCII.GetBytes("$($Map["username"]):$($Map["password"])"))
-    return @{
-        Authorization = "Basic $Token"
-        Accept = "application/vnd.github+json"
-        "User-Agent" = "TaskbarStatsReleaseScript"
-        "X-GitHub-Api-Version" = "2022-11-28"
-    }
+if (-not (Test-Path $Exe)) {
+    throw "Expected artifact not found: $Exe"
 }
+
+$Hash = (Get-FileHash $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -Path $Sha -Value "$Hash  TaskbarStats.exe" -Encoding ASCII
+
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    $ReleaseExists = $false
+    try {
+        gh release view $Tag --repo $Repo *> $null
+        $ReleaseExists = $true
+    } catch {
+        $ReleaseExists = $false
+    }
+
+    if ($ReleaseExists) {
+        gh release upload $Tag $Exe $Sha --repo $Repo --clobber
+    } else {
+        $Args = @(
+            "release", "create", $Tag,
+            $Exe, $Sha,
+            "--repo", $Repo,
+            "--title", "TaskbarStats $Tag",
+            "--notes", "TaskbarStats product build."
+        )
+        if ($Draft) {
+            $Args += "--draft"
+        }
+        if ($Prerelease) {
+            $Args += "--prerelease"
+        }
+
+        gh @Args
+    }
+} else {
+    Write-Warning "GitHub CLI was not found. Falling back to GitHub REST API with git credential manager."
+    Publish-WithGitHubRest -Repo $Repo -Tag $Tag -Files @($Exe, $Sha) -Draft:$Draft -Prerelease:$Prerelease
+}
+
+Write-Host "Release asset uploaded: $Repo $Tag"
