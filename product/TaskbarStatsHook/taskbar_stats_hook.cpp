@@ -824,6 +824,7 @@ void AppendActionMenuButton(wuxc::StackPanel const& panel,
 void ShowAccountMenu(wux::FrameworkElement const& root) {
     try {
         auto flyout = wuxc::Flyout();
+        flyout.Placement(wuxcp::FlyoutPlacementMode::Top);
         auto accounts = ReadCodexAccounts();
 
         wuxc::Border surface;
