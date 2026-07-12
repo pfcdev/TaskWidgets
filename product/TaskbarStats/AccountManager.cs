@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace TaskbarStatsProduct;
 
@@ -55,6 +56,8 @@ internal static class AccountManager
             RefreshAccountEmailsUnlocked(settings);
             WriteSettingsUnlocked(settings);
         }
+
+        EnsureReloadKeybindingsForKnownProfiles();
     }
 
     public static long GetChangeVersion() => Interlocked.Read(ref s_changeVersion);
@@ -375,7 +378,7 @@ internal static class AccountManager
             return;
         }
 
-        if (TryReloadRunningIdeWindow(idePath, activeAccount))
+        if (TryReloadRunningIdeWindow(activeAccount))
         {
             return;
         }
@@ -383,36 +386,68 @@ internal static class AccountManager
         Log($"Restart IDE skipped: no running Antigravity window to reload for account {activeAccount.Id}");
     }
 
-    private static bool TryReloadRunningIdeWindow(string idePath, AccountSnapshot account)
+    private static bool TryReloadRunningIdeWindow(AccountSnapshot account)
     {
-        if (!GetAntigravityProcesses().Any(process =>
+        var windowProcess = GetAntigravityProcesses()
+            .FirstOrDefault(process =>
             {
-                using (process)
+                try
+                {
+                    return !process.HasExited &&
+                           process.MainWindowHandle != IntPtr.Zero &&
+                           Regex.IsMatch(process.MainWindowTitle ?? "",
+                               "Antigravity.*IDE|IDE.*Antigravity",
+                               RegexOptions.IgnoreCase);
+                }
+                catch
+                {
+                    return false;
+                }
+            }) ??
+            GetAntigravityProcesses()
+                .FirstOrDefault(process =>
                 {
                     try
                     {
-                        return !process.HasExited && process.MainWindowHandle != IntPtr.Zero;
+                        return !process.HasExited &&
+                               process.MainWindowHandle != IntPtr.Zero;
                     }
                     catch
                     {
                         return false;
                     }
-                }
-            }))
+                });
+
+        if (windowProcess is null)
         {
             return false;
         }
 
         var ideProfile = GetIdeProfilePath(account);
-        if (LaunchIdeCommand(idePath, account, ideProfile,
-                "workbench.action.reloadWindow", "reload-window"))
+        EnsureAntigravityReloadKeybinding(GetDefaultAntigravityProfilePath());
+        EnsureAntigravityReloadKeybinding(ideProfile);
+
+        try
         {
-            Log($"Requested Antigravity/VS Code window reload for Codex account {account.Id}");
+            var pid = windowProcess.Id;
+            var title = windowProcess.MainWindowTitle;
+            windowProcess.Dispose();
+
+            if (!SendReloadShortcutToAntigravityWindow(pid, account))
+            {
+                return false;
+            }
+
+            Log($"Sent Antigravity reload shortcut for Codex account {account.Id}: pid={pid}; title={title}");
             Thread.Sleep(2500);
             return true;
         }
-
-        return false;
+        catch (Exception ex)
+        {
+            Log($"Failed to send Antigravity reload shortcut for account {account.Id}: {ex.Message}");
+            windowProcess.Dispose();
+            return false;
+        }
     }
 
     private static bool WaitForAntigravityMainWindowsToClose(TimeSpan timeout)
@@ -631,6 +666,7 @@ internal static class AccountManager
         var ideProfile = GetIdeProfilePath(account);
         Directory.CreateDirectory(RealCodexHome);
         Directory.CreateDirectory(ideProfile);
+        EnsureAntigravityReloadKeybinding(ideProfile);
 
         if (LaunchAntigravityWithProfile(idePath, account, ideProfile, "primary") &&
             WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
@@ -988,11 +1024,177 @@ internal static class AccountManager
     {
         if (string.Equals(account.Id, DefaultAccountId, StringComparison.OrdinalIgnoreCase))
         {
-            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            return Path.Combine(appData, "Antigravity IDE");
+            return GetDefaultAntigravityProfilePath();
         }
 
         return Path.Combine(IdeProfilesDirectory, SanitizePathSegment(account.Id));
+    }
+
+    private static string GetDefaultAntigravityProfilePath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        return Path.Combine(appData, "Antigravity IDE");
+    }
+
+    private static void EnsureReloadKeybindingsForKnownProfiles()
+    {
+        EnsureAntigravityReloadKeybinding(GetDefaultAntigravityProfilePath());
+
+        try
+        {
+            if (!Directory.Exists(IdeProfilesDirectory))
+            {
+                return;
+            }
+
+            foreach (var profile in Directory.EnumerateDirectories(IdeProfilesDirectory))
+            {
+                EnsureAntigravityReloadKeybinding(profile);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to update Antigravity reload keybindings for known profiles: {ex.Message}");
+        }
+    }
+
+    private static void EnsureAntigravityReloadKeybinding(string ideProfile)
+    {
+        try
+        {
+            var userDirectory = Path.Combine(ideProfile, "User");
+            Directory.CreateDirectory(userDirectory);
+
+            var keybindingsPath = Path.Combine(userDirectory, "keybindings.json");
+            const string key = "ctrl+alt+shift+r";
+            const string command = "workbench.action.reloadWindow";
+            var entry =
+                $"    {{{Environment.NewLine}" +
+                $"        \"key\": \"{key}\",{Environment.NewLine}" +
+                $"        \"command\": \"{command}\"{Environment.NewLine}" +
+                "    }";
+
+            if (!File.Exists(keybindingsPath))
+            {
+                File.WriteAllText(keybindingsPath,
+                    $"[{Environment.NewLine}{entry}{Environment.NewLine}]{Environment.NewLine}",
+                    Encoding.UTF8);
+                Log($"Created Antigravity reload keybinding: {keybindingsPath}");
+                return;
+            }
+
+            var text = File.ReadAllText(keybindingsPath, Encoding.UTF8);
+            var escapedKey = Regex.Escape(key);
+            var escapedCommand = Regex.Escape(command);
+            var existingKeyThenCommand =
+                $"\\{{[^{{}}]*\"key\"\\s*:\\s*\"{escapedKey}\"[^{{}}]*\"command\"\\s*:\\s*\"{escapedCommand}\"[^{{}}]*\\}}";
+            var existingCommandThenKey =
+                $"\\{{[^{{}}]*\"command\"\\s*:\\s*\"{escapedCommand}\"[^{{}}]*\"key\"\\s*:\\s*\"{escapedKey}\"[^{{}}]*\\}}";
+            if (Regex.IsMatch(text, existingKeyThenCommand,
+                    RegexOptions.IgnoreCase | RegexOptions.Singleline) ||
+                Regex.IsMatch(text, existingCommandThenKey,
+                    RegexOptions.IgnoreCase | RegexOptions.Singleline))
+            {
+                return;
+            }
+
+            var openIndex = text.IndexOf('[');
+            var closeIndex = text.LastIndexOf(']');
+            if (openIndex < 0 || closeIndex < openIndex)
+            {
+                File.Copy(keybindingsPath, $"{keybindingsPath}.bak-taskbarstats",
+                    overwrite: true);
+                File.WriteAllText(keybindingsPath,
+                    $"[{Environment.NewLine}{entry}{Environment.NewLine}]{Environment.NewLine}",
+                    Encoding.UTF8);
+                Log($"Reset malformed Antigravity keybindings file and added reload shortcut: {keybindingsPath}");
+                return;
+            }
+
+            var inner = text.Substring(openIndex + 1, closeIndex - openIndex - 1);
+            var innerWithoutComments = string.Join(Environment.NewLine,
+                inner.Split(["\r\n", "\n"], StringSplitOptions.None)
+                    .Where(line => !line.TrimStart().StartsWith("//",
+                        StringComparison.Ordinal)));
+            var comma = string.IsNullOrWhiteSpace(innerWithoutComments) ? "" : ",";
+            var updated =
+                text[..closeIndex].TrimEnd() +
+                comma +
+                Environment.NewLine +
+                entry +
+                Environment.NewLine +
+                text[closeIndex..];
+            File.WriteAllText(keybindingsPath, updated, Encoding.UTF8);
+            Log($"Added Antigravity reload keybinding: {keybindingsPath}");
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to ensure Antigravity reload keybinding in {ideProfile}: {ex.Message}");
+        }
+    }
+
+    private static bool SendReloadShortcutToAntigravityWindow(
+        int processId,
+        AccountSnapshot account)
+    {
+        var script = string.Join(Environment.NewLine, new[]
+        {
+            "$ErrorActionPreference = \"Stop\"",
+            "$shell = New-Object -ComObject WScript.Shell",
+            $"if (-not $shell.AppActivate({processId})) {{",
+            "    throw \"Antigravity IDE penceresi one getirilemedi.\"",
+            "}",
+            "Start-Sleep -Milliseconds 300",
+            "$shell.SendKeys(\"^%+r\")"
+        });
+        var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+
+        var info = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        info.ArgumentList.Add("-NoProfile");
+        info.ArgumentList.Add("-ExecutionPolicy");
+        info.ArgumentList.Add("Bypass");
+        info.ArgumentList.Add("-EncodedCommand");
+        info.ArgumentList.Add(encodedScript);
+
+        try
+        {
+            using var process = Process.Start(info);
+            if (process is null)
+            {
+                Log($"Failed to start reload shortcut sender for account {account.Id}");
+                return false;
+            }
+
+            if (!process.WaitForExit(8000))
+            {
+                process.Kill(entireProcessTree: true);
+                Log($"Reload shortcut sender timed out for account {account.Id}");
+                return false;
+            }
+
+            if (process.ExitCode == 0)
+            {
+                return true;
+            }
+
+            var error = process.StandardError.ReadToEnd().Trim();
+            var output = process.StandardOutput.ReadToEnd().Trim();
+            Log($"Reload shortcut sender failed for account {account.Id}: exit={process.ExitCode}; error={error}; output={output}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log($"Reload shortcut sender failed for account {account.Id}: {ex.Message}");
+            return false;
+        }
     }
 
     private static void DeleteDirectoryBestEffort(string path)
