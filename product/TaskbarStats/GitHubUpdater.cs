@@ -11,9 +11,7 @@ internal static class GitHubUpdater
     private const string Repo = "TaskWidgets";
     private const string AssetName = "TaskbarStats.exe";
     private const string ShaAssetName = "TaskbarStats.exe.sha256";
-    private static readonly string LocalAppData =
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    private static readonly string AppDirectory = Path.Combine(LocalAppData, "TaskbarStats");
+    private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string UpdatesDirectory = Path.Combine(AppDirectory, "Updates");
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");

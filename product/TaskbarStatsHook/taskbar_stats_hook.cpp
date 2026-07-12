@@ -71,7 +71,23 @@ HWND g_win32ProofWindow = nullptr;
 HWND g_win32ProofParent = nullptr;
 HMODULE g_hookModule = nullptr;
 
-std::wstring GetLocalAppDataTaskbarStatsPath(PCWSTR leaf) {
+HMODULE GetCurrentModuleHandle();
+
+std::wstring ParentDirectory(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) {
+        return {};
+    }
+
+    return path.substr(0, slash);
+}
+
+std::wstring FileNameFromPath(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+std::wstring GetFallbackTaskbarStatsRootPath() {
     WCHAR localAppData[MAX_PATH]{};
     DWORD length = GetEnvironmentVariable(L"LOCALAPPDATA", localAppData,
                                           ARRAYSIZE(localAppData));
@@ -81,6 +97,39 @@ std::wstring GetLocalAppDataTaskbarStatsPath(PCWSTR leaf) {
 
     std::wstring path = localAppData;
     path += L"\\TaskbarStats";
+    return path;
+}
+
+std::wstring GetTaskbarStatsRootPath() {
+    HMODULE module = g_hookModule ? g_hookModule : GetCurrentModuleHandle();
+    if (module) {
+        WCHAR modulePath[MAX_PATH]{};
+        DWORD length = GetModuleFileName(module, modulePath, ARRAYSIZE(modulePath));
+        if (length > 0 && length < ARRAYSIZE(modulePath)) {
+            std::wstring hookDirectory = ParentDirectory(modulePath);
+            std::wstring runtimeHashDirectory = ParentDirectory(hookDirectory);
+            std::wstring runtimeDirectory = ParentDirectory(runtimeHashDirectory);
+            if (!runtimeDirectory.empty() &&
+                _wcsicmp(FileNameFromPath(runtimeHashDirectory).c_str(),
+                         L"Runtime") == 0) {
+                return runtimeDirectory;
+            }
+
+            if (!hookDirectory.empty()) {
+                return hookDirectory;
+            }
+        }
+    }
+
+    return GetFallbackTaskbarStatsRootPath();
+}
+
+std::wstring GetTaskbarStatsLogPath(PCWSTR leaf) {
+    std::wstring path = GetTaskbarStatsRootPath();
+    if (path.empty()) {
+        return {};
+    }
+
     CreateDirectory(path.c_str(), nullptr);
     path += L"\\Logs";
     CreateDirectory(path.c_str(), nullptr);
@@ -90,7 +139,7 @@ std::wstring GetLocalAppDataTaskbarStatsPath(PCWSTR leaf) {
 }
 
 void Wh_Log(PCWSTR format, ...) {
-    std::wstring path = GetLocalAppDataTaskbarStatsPath(L"hook.log");
+    std::wstring path = GetTaskbarStatsLogPath(L"hook.log");
     if (path.empty()) {
         return;
     }
@@ -117,15 +166,11 @@ void Wh_Log(PCWSTR format, ...) {
 }
 
 std::wstring GetTaskbarStatsPath(PCWSTR leaf = nullptr) {
-    WCHAR localAppData[MAX_PATH]{};
-    DWORD length = GetEnvironmentVariable(L"LOCALAPPDATA", localAppData,
-                                          ARRAYSIZE(localAppData));
-    if (length == 0 || length >= ARRAYSIZE(localAppData)) {
+    std::wstring path = GetTaskbarStatsRootPath();
+    if (path.empty()) {
         return {};
     }
 
-    std::wstring path = localAppData;
-    path += L"\\TaskbarStats";
     CreateDirectory(path.c_str(), nullptr);
     if (leaf && *leaf) {
         path += L"\\";
@@ -242,15 +287,12 @@ struct InsertedModule {
 thread_local std::vector<InsertedModule> g_insertedModules;
 
 std::wstring GetAssetsFolder() {
-    WCHAR localAppData[MAX_PATH]{};
-    DWORD length = GetEnvironmentVariable(L"LOCALAPPDATA", localAppData,
-                                          ARRAYSIZE(localAppData));
-    if (length == 0 || length >= ARRAYSIZE(localAppData)) {
+    std::wstring path = GetTaskbarStatsRootPath();
+    if (path.empty()) {
         return {};
     }
 
-    std::wstring path = localAppData;
-    path += L"\\TaskbarStats\\Assets\\";
+    path += L"\\Assets\\";
     return path;
 }
 
@@ -329,6 +371,9 @@ std::vector<std::wstring> GetAntigravityProjectTitles();
 void SetExpandedMode(wux::UIElement const& root, bool expanded);
 void ShowAccountMenu(wux::FrameworkElement const& root);
 HWND FindCurrentProcessTaskbarWindow();
+void UpdateTaskbarStatsRoot(wux::UIElement const& root);
+void ShowWidgetLibraryWindow();
+void RefreshInsertedTaskbarStatsRoots();
 
 struct CodexAccountInfo {
     std::wstring id;
@@ -344,10 +389,19 @@ struct AccountMenuHitItem {
     std::wstring accountId;
 };
 
+struct WidgetLibraryHitItem {
+    RECT rect{};
+    std::wstring command;
+    std::wstring designId;
+};
+
 HWND g_accountMenuWindow = nullptr;
 std::vector<CodexAccountInfo> g_accountMenuAccounts;
 std::vector<AccountMenuHitItem> g_accountMenuHitItems;
 int g_accountMenuHoveredIndex = -1;
+HWND g_widgetLibraryWindow = nullptr;
+std::vector<WidgetLibraryHitItem> g_widgetLibraryHitItems;
+int g_widgetLibraryHoveredIndex = -1;
 
 wuxc::FontIcon MakeNamedStateIcon(PCWSTR name) {
     wuxc::FontIcon icon;
@@ -420,6 +474,77 @@ wux::FrameworkElement MakeExpandedProjectRow(PCWSTR rowName,
     row.Children().Append(icon.as<wux::UIElement>());
     row.Children().Append(stateText.as<wux::UIElement>());
     return row;
+}
+
+wux::FrameworkElement MakeWeatherPanel() {
+    wuxc::Grid weather;
+    weather.Name(L"TaskbarStatsWeatherPanel");
+    weather.Height(36);
+    weather.Width(184);
+    weather.Visibility(wux::Visibility::Collapsed);
+
+    wuxc::ColumnDefinition iconColumn;
+    iconColumn.Width(wux::GridLengthHelper::FromPixels(34));
+    wuxc::ColumnDefinition mainColumn;
+    mainColumn.Width(wux::GridLengthHelper::FromPixels(84));
+    wuxc::ColumnDefinition metaColumn;
+    metaColumn.Width(wux::GridLengthHelper::FromPixels(66));
+    weather.ColumnDefinitions().Append(iconColumn);
+    weather.ColumnDefinitions().Append(mainColumn);
+    weather.ColumnDefinitions().Append(metaColumn);
+
+    wuxc::FontIcon icon;
+    icon.Glyph(L"\xE706");
+    icon.FontFamily(wuxm::FontFamily(L"Segoe MDL2 Assets"));
+    icon.FontSize(20);
+    icon.Width(30);
+    icon.Height(30);
+    icon.HorizontalAlignment(wux::HorizontalAlignment::Center);
+    icon.VerticalAlignment(wux::VerticalAlignment::Center);
+    icon.Foreground(MakeBrush(0xFF, 0xF8, 0xC5, 0x55));
+    wuxc::Grid::SetColumn(icon, 0);
+
+    wuxc::StackPanel main;
+    main.Orientation(wuxc::Orientation::Vertical);
+    main.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    main.VerticalAlignment(wux::VerticalAlignment::Center);
+    auto city = MakeNamedText(L"TaskbarStatsWeatherCity", L"Istanbul", 10, 0xF4);
+    city.Width(78);
+    city.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    city.TextAlignment(wux::TextAlignment::Left);
+    city.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    auto condition =
+        MakeNamedText(L"TaskbarStatsWeatherCondition", L"Static weather", 8, 0xB8);
+    condition.Width(78);
+    condition.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    condition.TextAlignment(wux::TextAlignment::Left);
+    condition.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    condition.Margin(wux::ThicknessHelper::FromLengths(0, -1, 0, 0));
+    main.Children().Append(city.as<wux::UIElement>());
+    main.Children().Append(condition.as<wux::UIElement>());
+    wuxc::Grid::SetColumn(main, 1);
+
+    wuxc::StackPanel meta;
+    meta.Orientation(wuxc::Orientation::Vertical);
+    meta.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    meta.VerticalAlignment(wux::VerticalAlignment::Center);
+    auto temp = MakeNamedText(L"TaskbarStatsWeatherTemp", L"24 C", 13, 0xFF);
+    temp.Width(58);
+    temp.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    temp.TextAlignment(wux::TextAlignment::Right);
+    auto detail = MakeNamedText(L"TaskbarStatsWeatherDetail", L"42% RH", 8, 0xB8);
+    detail.Width(58);
+    detail.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    detail.TextAlignment(wux::TextAlignment::Right);
+    detail.Margin(wux::ThicknessHelper::FromLengths(0, -2, 0, 0));
+    meta.Children().Append(temp.as<wux::UIElement>());
+    meta.Children().Append(detail.as<wux::UIElement>());
+    wuxc::Grid::SetColumn(meta, 2);
+
+    weather.Children().Append(icon.as<wux::UIElement>());
+    weather.Children().Append(main.as<wux::UIElement>());
+    weather.Children().Append(meta.as<wux::UIElement>());
+    return weather;
 }
 
 wux::FrameworkElement MakeTaskbarStatsRoot() {
@@ -537,6 +662,7 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
 
     root.Children().Append(compact.as<wux::UIElement>());
     root.Children().Append(expanded.as<wux::UIElement>());
+    root.Children().Append(MakeWeatherPanel().as<wux::UIElement>());
     root.PointerEntered([root](auto const&, auto const&) {
         SetExpandedMode(root.as<wux::UIElement>(), true);
     });
@@ -552,16 +678,11 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
 }
 
 std::wstring GetCodexStatusPath() {
-    WCHAR localAppData[MAX_PATH]{};
-    DWORD length = GetEnvironmentVariable(L"LOCALAPPDATA", localAppData,
-                                          ARRAYSIZE(localAppData));
-    if (length == 0 || length >= ARRAYSIZE(localAppData)) {
-        return {};
-    }
+    return GetTaskbarStatsPath(L"codex-status.json");
+}
 
-    std::wstring path = localAppData;
-    path += L"\\TaskbarStats\\codex-status.json";
-    return path;
+std::wstring GetWidgetSettingsPath() {
+    return GetTaskbarStatsPath(L"widget-settings.json");
 }
 
 std::string ReadUtf8File(const std::wstring& path) {
@@ -591,6 +712,21 @@ std::string ReadUtf8File(const std::wstring& path) {
 
     data.resize(read);
     return data;
+}
+
+bool WriteUtf8File(const std::wstring& path, const std::string& data) {
+    HANDLE file = CreateFile(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(file, data.data(), static_cast<DWORD>(data.size()),
+                        &written, nullptr);
+    CloseHandle(file);
+    return ok && static_cast<size_t>(written) == data.size();
 }
 
 bool ExtractJsonString(const std::string& json,
@@ -642,6 +778,35 @@ bool ExtractJsonString(const std::string& json,
     MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), static_cast<int>(raw.size()),
                         value.data(), wideLength);
     return true;
+}
+
+bool IsKnownWidgetDesign(const std::wstring& designId) {
+    return _wcsicmp(designId.c_str(), L"codex-status") == 0 ||
+           _wcsicmp(designId.c_str(), L"weather-static") == 0;
+}
+
+std::wstring ReadActiveWidgetDesign() {
+    std::wstring activeDesign;
+    std::string json = ReadUtf8File(GetWidgetSettingsPath());
+    if (!json.empty()) {
+        ExtractJsonString(json, "activeDesign", activeDesign);
+    }
+
+    if (_wcsicmp(activeDesign.c_str(), L"weather-static") == 0) {
+        return L"weather-static";
+    }
+
+    return L"codex-status";
+}
+
+bool WriteActiveWidgetDesign(const std::wstring& designId) {
+    if (!IsKnownWidgetDesign(designId)) {
+        return false;
+    }
+
+    std::string json = "{\n  \"activeDesign\": \"" +
+                       JsonEscapeUtf8(designId) + "\"\n}\n";
+    return WriteUtf8File(GetWidgetSettingsPath(), json);
 }
 
 std::vector<CodexAccountInfo> ReadCodexAccounts() {
@@ -877,11 +1042,34 @@ void DrawAccountMenuPopup(HDC dc, RECT clientRect) {
 
     constexpr int width = 336;
     constexpr int padding = 10;
+    constexpr int headerHeight = 46;
     constexpr int accountHeight = 56;
     constexpr int actionHeight = 36;
 
-    int y = padding;
-    int hitIndex = 0;
+    RECT titleRect{padding + 4, 7, width - 54, 26};
+    RECT subtitleRect{padding + 4, 25, width - 54, 42};
+    RECT settingsRect{width - 44, 8, width - 10, 40};
+    if (g_accountMenuHoveredIndex == 0) {
+        HBRUSH hoverBrush = CreateSolidBrush(RGB(43, 50, 60));
+        FillRect(dc, &settingsRect, hoverBrush);
+        DeleteObject(hoverBrush);
+    }
+
+    DrawPopupText(dc, L"TaskbarStats", titleRect, RGB(248, 250, 252),
+                  titleFont);
+    DrawPopupText(dc, L"Widget library and Codex accounts", subtitleRect,
+                  RGB(148, 163, 184), detailFont);
+    DrawPopupText(dc, L"\xE713", settingsRect, RGB(203, 213, 225), iconFont,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT headerSeparator{padding + 4, headerHeight - 1, width - padding - 4,
+                         headerHeight};
+    HBRUSH headerSeparatorBrush = CreateSolidBrush(RGB(62, 70, 82));
+    FillRect(dc, &headerSeparator, headerSeparatorBrush);
+    DeleteObject(headerSeparatorBrush);
+
+    int y = headerHeight + 2;
+    int hitIndex = 1;
     for (const auto& account : g_accountMenuAccounts) {
         RECT row{padding, y, width - padding, y + accountHeight};
         if (account.active || g_accountMenuHoveredIndex == hitIndex) {
@@ -969,10 +1157,16 @@ void DrawAccountMenuPopup(HDC dc, RECT clientRect) {
 void RebuildAccountMenuHitItems(int width) {
     g_accountMenuHitItems.clear();
     constexpr int padding = 10;
+    constexpr int headerHeight = 46;
     constexpr int accountHeight = 56;
     constexpr int actionHeight = 36;
 
-    int y = padding;
+    g_accountMenuHitItems.push_back(AccountMenuHitItem{
+        .rect = RECT{width - 44, 8, width - 10, 40},
+        .command = L"__openWidgetLibrary",
+    });
+
+    int y = headerHeight + 2;
     for (const auto& account : g_accountMenuAccounts) {
         g_accountMenuHitItems.push_back(AccountMenuHitItem{
             .rect = RECT{padding, y, width - padding, y + accountHeight},
@@ -1054,6 +1248,12 @@ LRESULT CALLBACK AccountMenuWindowProc(HWND window,
             if (hitIndex >= 0 &&
                 hitIndex < static_cast<int>(g_accountMenuHitItems.size())) {
                 const auto& item = g_accountMenuHitItems[hitIndex];
+                if (item.command == L"__openWidgetLibrary") {
+                    DestroyWindow(window);
+                    ShowWidgetLibraryWindow();
+                    return 0;
+                }
+
                 WriteTaskbarStatsCommand(item.command, item.accountId);
                 DestroyWindow(window);
                 return 0;
@@ -1153,7 +1353,7 @@ void ShowAccountMenu(wux::FrameworkElement const& root) {
                 {L"default", L"Default", L"", L"", true});
         }
         constexpr int width = 336;
-        int height = 10 + static_cast<int>(g_accountMenuAccounts.size()) * 56 +
+        int height = 58 + static_cast<int>(g_accountMenuAccounts.size()) * 56 +
                      12 + 4 * 36 + 10;
         RebuildAccountMenuHitItems(width);
 
@@ -1199,6 +1399,404 @@ void ShowAccountMenu(wux::FrameworkElement const& root) {
                ex.message().c_str());
     } catch (...) {
         Wh_Log(L"ShowAccountMenu failed with unknown exception");
+    }
+}
+
+void DrawFilledRoundRect(HDC dc,
+                         RECT rect,
+                         int radius,
+                         COLORREF fill,
+                         COLORREF border) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+RECT GetWidgetLibraryCardRect(int index, int width) {
+    int contentLeft = width >= 820 ? 284 : 24;
+    int contentRight = width - 28;
+    int gap = 22;
+    int cardWidth = width >= 1080 ? 360 : contentRight - contentLeft;
+    int cardHeight = 150;
+    int x = contentLeft;
+    int y = 150;
+
+    if (width >= 1080 && index == 1) {
+        x += cardWidth + gap;
+    } else if (index == 1) {
+        y += cardHeight + gap;
+    } else if (index == 2) {
+        y += cardHeight + gap;
+        if (width < 1080) {
+            y += cardHeight + gap;
+        }
+    }
+
+    return RECT{x, y, x + cardWidth, y + cardHeight};
+}
+
+void RebuildWidgetLibraryHitItems(int width, int height) {
+    g_widgetLibraryHitItems.clear();
+    g_widgetLibraryHitItems.push_back(WidgetLibraryHitItem{
+        .rect = RECT{width - 62, 24, width - 24, 62},
+        .command = L"__close",
+    });
+    g_widgetLibraryHitItems.push_back(WidgetLibraryHitItem{
+        .rect = GetWidgetLibraryCardRect(0, width),
+        .command = L"selectWidgetDesign",
+        .designId = L"codex-status",
+    });
+    g_widgetLibraryHitItems.push_back(WidgetLibraryHitItem{
+        .rect = GetWidgetLibraryCardRect(1, width),
+        .command = L"selectWidgetDesign",
+        .designId = L"weather-static",
+    });
+    g_widgetLibraryHitItems.push_back(WidgetLibraryHitItem{
+        .rect = GetWidgetLibraryCardRect(2, width),
+        .command = L"addWidgetLibrary",
+    });
+}
+
+int HitTestWidgetLibraryItem(POINT point) {
+    for (size_t i = 0; i < g_widgetLibraryHitItems.size(); ++i) {
+        if (PtInRect(&g_widgetLibraryHitItems[i].rect, point)) {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+void DrawWidgetLibraryCard(HDC dc,
+                           RECT card,
+                           PCWSTR glyph,
+                           PCWSTR title,
+                           PCWSTR subtitle,
+                           PCWSTR detail,
+                           bool selected,
+                           bool hovered,
+                           HFONT titleFont,
+                           HFONT detailFont,
+                           HFONT smallFont,
+                           HFONT iconFont,
+                           COLORREF accent) {
+    COLORREF fill = selected ? RGB(31, 43, 56)
+                             : hovered ? RGB(29, 35, 45) : RGB(24, 29, 38);
+    COLORREF border = selected ? accent : RGB(48, 57, 72);
+    DrawFilledRoundRect(dc, card, 18, fill, border);
+
+    RECT stripe{card.left + 18, card.top + 18, card.left + 22, card.bottom - 18};
+    HBRUSH stripeBrush = CreateSolidBrush(accent);
+    FillRect(dc, &stripe, stripeBrush);
+    DeleteObject(stripeBrush);
+
+    RECT iconRect{card.left + 38, card.top + 28, card.left + 76, card.top + 68};
+    DrawPopupText(dc, glyph, iconRect, accent, iconFont,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT titleRect{card.left + 88, card.top + 24, card.right - 24, card.top + 52};
+    RECT subtitleRect{card.left + 88, card.top + 53, card.right - 24,
+                      card.top + 78};
+    RECT detailRect{card.left + 28, card.bottom - 46, card.right - 28,
+                    card.bottom - 18};
+    DrawPopupText(dc, title, titleRect, RGB(248, 250, 252), titleFont);
+    DrawPopupText(dc, subtitle, subtitleRect, RGB(148, 163, 184), detailFont);
+    DrawPopupText(dc, detail, detailRect, RGB(203, 213, 225), smallFont);
+
+    if (selected) {
+        RECT badge{card.right - 92, card.top + 18, card.right - 20, card.top + 42};
+        DrawFilledRoundRect(dc, badge, 12, RGB(15, 118, 110), RGB(20, 184, 166));
+        DrawPopupText(dc, L"ACTIVE", badge, RGB(236, 253, 245), smallFont,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+void DrawWidgetLibraryWindow(HDC dc, RECT clientRect) {
+    HBRUSH background = CreateSolidBrush(RGB(13, 17, 23));
+    FillRect(dc, &clientRect, background);
+    DeleteObject(background);
+    SetBkMode(dc, TRANSPARENT);
+
+    HFONT heroFont = CreateFontW(
+        -30, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT titleFont = CreateFontW(
+        -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT detailFont = CreateFontW(
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT smallFont = CreateFontW(
+        -11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT iconFont = CreateFontW(
+        -24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+    HFONT navIconFont = CreateFontW(
+        -18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+
+    int width = clientRect.right - clientRect.left;
+    int height = clientRect.bottom - clientRect.top;
+    bool wide = width >= 820;
+    std::wstring activeDesign = ReadActiveWidgetDesign();
+
+    if (wide) {
+        RECT sidebar{0, 0, 248, height};
+        HBRUSH sidebarBrush = CreateSolidBrush(RGB(18, 23, 31));
+        FillRect(dc, &sidebar, sidebarBrush);
+        DeleteObject(sidebarBrush);
+
+        RECT brand{28, 30, 220, 60};
+        RECT nav1{28, 104, 220, 138};
+        RECT nav2{28, 146, 220, 180};
+        DrawPopupText(dc, L"TaskbarStats", brand, RGB(248, 250, 252), titleFont);
+        DrawFilledRoundRect(dc, nav1, 12, RGB(30, 41, 59), RGB(51, 65, 85));
+        DrawPopupText(dc, L"\xE8A5", RECT{nav1.left + 12, nav1.top, nav1.left + 38, nav1.bottom},
+                      RGB(56, 189, 248), navIconFont,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawPopupText(dc, L"Widget library",
+                      RECT{nav1.left + 46, nav1.top, nav1.right - 10, nav1.bottom},
+                      RGB(248, 250, 252), detailFont);
+        DrawPopupText(dc, L"\xE713", RECT{nav2.left + 12, nav2.top, nav2.left + 38, nav2.bottom},
+                      RGB(148, 163, 184), navIconFont,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawPopupText(dc, L"Design settings",
+                      RECT{nav2.left + 46, nav2.top, nav2.right - 10, nav2.bottom},
+                      RGB(148, 163, 184), detailFont);
+    }
+
+    RECT closeRect{width - 62, 24, width - 24, 62};
+    if (g_widgetLibraryHoveredIndex == 0) {
+        DrawFilledRoundRect(dc, closeRect, 12, RGB(35, 42, 52), RGB(58, 68, 82));
+    }
+    DrawPopupText(dc, L"\xE711", closeRect, RGB(203, 213, 225), navIconFont,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int contentLeft = wide ? 284 : 24;
+    RECT hero{contentLeft, 30, width - 90, 72};
+    RECT sub{contentLeft, 76, width - 90, 104};
+    DrawPopupText(dc, L"Widget Library", hero, RGB(248, 250, 252), heroFont);
+    DrawPopupText(dc,
+                  L"Pick one taskbar design. New design packs will live here.",
+                  sub, RGB(148, 163, 184), detailFont);
+
+    DrawWidgetLibraryCard(
+        dc, GetWidgetLibraryCardRect(0, width), L"\xE950", L"Codex Status",
+        L"Current Antigravity / Codex quota design",
+        L"Rate limit, reset, weekly quota, 30-day token metrics",
+        activeDesign == L"codex-status", g_widgetLibraryHoveredIndex == 1,
+        titleFont, detailFont, smallFont, iconFont, RGB(56, 189, 248));
+    DrawWidgetLibraryCard(
+        dc, GetWidgetLibraryCardRect(1, width), L"\xE706", L"Static Weather",
+        L"Simple test design with fixed weather values",
+        L"Istanbul 24 C, static condition, humidity placeholder",
+        activeDesign == L"weather-static", g_widgetLibraryHoveredIndex == 2,
+        titleFont, detailFont, smallFont, iconFont, RGB(248, 197, 85));
+    DrawWidgetLibraryCard(
+        dc, GetWidgetLibraryCardRect(2, width), L"\xE710", L"Add Library",
+        L"Reserved for importing your future native design packs",
+        L"Design pack loading is the next layer; this action is queued.",
+        false, g_widgetLibraryHoveredIndex == 3, titleFont, detailFont,
+        smallFont, iconFont, RGB(94, 234, 212));
+
+    DeleteObject(heroFont);
+    DeleteObject(titleFont);
+    DeleteObject(detailFont);
+    DeleteObject(smallFont);
+    DeleteObject(iconFont);
+    DeleteObject(navIconFont);
+}
+
+LRESULT CALLBACK WidgetLibraryWindowProc(HWND window,
+                                         UINT message,
+                                         WPARAM wParam,
+                                         LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_SIZE: {
+            RECT rect{};
+            GetClientRect(window, &rect);
+            RebuildWidgetLibraryHitItems(rect.right - rect.left,
+                                         rect.bottom - rect.top);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(window, &ps);
+            RECT rect{};
+            GetClientRect(window, &rect);
+            DrawWidgetLibraryWindow(dc, rect);
+            EndPaint(window, &ps);
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            int hoveredIndex = HitTestWidgetLibraryItem(point);
+            if (hoveredIndex != g_widgetLibraryHoveredIndex) {
+                g_widgetLibraryHoveredIndex = hoveredIndex;
+                InvalidateRect(window, nullptr, FALSE);
+
+                TRACKMOUSEEVENT track{};
+                track.cbSize = sizeof(track);
+                track.dwFlags = TME_LEAVE;
+                track.hwndTrack = window;
+                TrackMouseEvent(&track);
+            }
+            return 0;
+        }
+
+        case WM_MOUSELEAVE:
+            if (g_widgetLibraryHoveredIndex != -1) {
+                g_widgetLibraryHoveredIndex = -1;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return 0;
+
+        case WM_LBUTTONUP: {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            int hitIndex = HitTestWidgetLibraryItem(point);
+            if (hitIndex >= 0 &&
+                hitIndex < static_cast<int>(g_widgetLibraryHitItems.size())) {
+                const auto& item = g_widgetLibraryHitItems[hitIndex];
+                if (item.command == L"__close") {
+                    DestroyWindow(window);
+                    return 0;
+                }
+
+                if (item.command == L"selectWidgetDesign") {
+                    if (WriteActiveWidgetDesign(item.designId)) {
+                        RefreshInsertedTaskbarStatsRoots();
+                        InvalidateRect(window, nullptr, FALSE);
+                    }
+                    return 0;
+                }
+
+                if (item.command == L"addWidgetLibrary") {
+                    WriteTaskbarStatsCommand(item.command);
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) {
+                DestroyWindow(window);
+                return 0;
+            }
+            break;
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_CANCELMODE:
+            DestroyWindow(window);
+            return 0;
+
+        case WM_CAPTURECHANGED:
+            if (g_widgetLibraryWindow == window &&
+                reinterpret_cast<HWND>(lParam) != window) {
+                DestroyWindow(window);
+            }
+            return 0;
+
+        case WM_DESTROY:
+            if (g_widgetLibraryWindow == window) {
+                g_widgetLibraryWindow = nullptr;
+            }
+            if (GetCapture() == window) {
+                ReleaseCapture();
+            }
+            g_widgetLibraryHoveredIndex = -1;
+            g_widgetLibraryHitItems.clear();
+            return 0;
+    }
+
+    return DefWindowProc(window, message, wParam, lParam);
+}
+
+RECT CalculateWidgetLibraryRect() {
+    HWND taskbar = FindCurrentProcessTaskbarWindow();
+    RECT anchor{};
+    if (!taskbar || !GetWindowRect(taskbar, &anchor)) {
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &anchor, 0);
+    }
+
+    HMONITOR monitor = MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    GetMonitorInfo(monitor, &monitorInfo);
+    return monitorInfo.rcWork;
+}
+
+void ShowWidgetLibraryWindow() {
+    try {
+        if (g_widgetLibraryWindow && IsWindow(g_widgetLibraryWindow)) {
+            DestroyWindow(g_widgetLibraryWindow);
+            return;
+        }
+
+        constexpr PCWSTR className = L"TaskbarStatsWidgetLibrary";
+        static bool classRegistered = false;
+        if (!classRegistered) {
+            WNDCLASS windowClass{};
+            windowClass.lpfnWndProc = WidgetLibraryWindowProc;
+            windowClass.hInstance = g_hookModule ? g_hookModule : GetModuleHandle(nullptr);
+            windowClass.lpszClassName = className;
+            windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            if (!RegisterClass(&windowClass) &&
+                GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                Wh_Log(L"RegisterClass failed for widget library: %u",
+                       GetLastError());
+                return;
+            }
+            classRegistered = true;
+        }
+
+        RECT rect = CalculateWidgetLibraryRect();
+        int width = rect.right - rect.left;
+        int height = rect.bottom - rect.top;
+        RebuildWidgetLibraryHitItems(width, height);
+
+        g_widgetLibraryWindow = CreateWindowEx(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            className, L"TaskbarStats Widget Library", WS_POPUP,
+            rect.left, rect.top, width, height,
+            FindCurrentProcessTaskbarWindow(), nullptr,
+            g_hookModule ? g_hookModule : GetModuleHandle(nullptr), nullptr);
+        if (!g_widgetLibraryWindow) {
+            Wh_Log(L"CreateWindowEx failed for widget library: %u",
+                   GetLastError());
+            return;
+        }
+
+        SetWindowPos(g_widgetLibraryWindow, HWND_TOPMOST, rect.left, rect.top,
+                     width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetCapture(g_widgetLibraryWindow);
+        InvalidateRect(g_widgetLibraryWindow, nullptr, TRUE);
+        Wh_Log(L"Widget library shown at %d,%d %dx%d",
+               rect.left, rect.top, width, height);
+    } catch (...) {
+        Wh_Log(L"ShowWidgetLibraryWindow failed with unknown exception");
     }
 }
 
@@ -1710,6 +2308,10 @@ void UpdateExpandedTaskRows(wux::UIElement const& root,
 }
 
 void SetExpandedMode(wux::UIElement const& root, bool expanded) {
+    if (ReadActiveWidgetDesign() != L"codex-status") {
+        expanded = false;
+    }
+
     if (expanded && GetAntigravityProjectTitles().size() <= 1) {
         expanded = false;
     }
@@ -1724,10 +2326,35 @@ void SetExpandedMode(wux::UIElement const& root, bool expanded) {
                                 : wux::Visibility::Visible);
     SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
                        expanded ? wux::Visibility::Visible
-                                : wux::Visibility::Collapsed);
+                                 : wux::Visibility::Collapsed);
 }
 
 void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
+    std::wstring activeDesign = ReadActiveWidgetDesign();
+    if (activeDesign == L"weather-static") {
+        auto rootElement = root.try_as<wux::FrameworkElement>();
+        if (rootElement) {
+            rootElement.Width(184);
+        }
+
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                           wux::Visibility::Visible);
+        SetNamedText(root, L"TaskbarStatsWeatherCity", L"Istanbul");
+        SetNamedText(root, L"TaskbarStatsWeatherCondition", L"Static weather");
+        SetNamedText(root, L"TaskbarStatsWeatherTemp", L"24 C");
+        SetNamedText(root, L"TaskbarStatsWeatherDetail", L"42% RH");
+        return;
+    }
+
+    SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                       wux::Visibility::Collapsed);
+    SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                       wux::Visibility::Visible);
+
     CodexStatusSnapshot snapshot = ReadCodexStatusSnapshot();
     if (!snapshot.loaded) {
         SetNamedText(root, L"TaskbarStatsTitle", L"Antigravity");
@@ -1768,6 +2395,14 @@ void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
                  FormatRemainingPercent(snapshot.secondaryUsedPercent));
     SetNamedText(root, L"TaskbarStatsTokens",
                  FormatTokenCount(snapshot.tokens30d));
+}
+
+void RefreshInsertedTaskbarStatsRoots() {
+    for (auto const& module : g_insertedModules) {
+        if (module.root) {
+            UpdateTaskbarStatsRoot(module.root);
+        }
+    }
 }
 
 wux::DispatcherTimer StartTaskbarStatsTimer(wux::UIElement const& root) {

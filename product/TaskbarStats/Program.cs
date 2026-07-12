@@ -9,9 +9,7 @@ namespace TaskbarStatsProduct;
 internal static class Program
 {
     private const string AppName = "TaskbarStats";
-    private static readonly string LocalAppData =
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    private static readonly string AppDirectory = Path.Combine(LocalAppData, AppName);
+    private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string RuntimeRoot = Path.Combine(AppDirectory, "Runtime");
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string LoaderLogPath = Path.Combine(LogsDirectory, "loader.log");

@@ -20,9 +20,10 @@ internal static class AccountManager
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
     private static readonly string UserProfile =
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    private static readonly string AppDirectory = Path.Combine(LocalAppData, "TaskbarStats");
+    private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string AccountsDirectory = Path.Combine(AppDirectory, "Accounts");
     private static readonly string IdeProfilesDirectory = Path.Combine(AppDirectory, "IdeProfiles");
+    private static readonly string WidgetLibrariesDirectory = Path.Combine(AppDirectory, "WidgetLibraries");
     private static readonly string CommandsDirectory = Path.Combine(AppDirectory, "Commands");
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string SettingsPath = Path.Combine(AppDirectory, "settings.json");
@@ -36,6 +37,7 @@ internal static class AccountManager
         Directory.CreateDirectory(AppDirectory);
         Directory.CreateDirectory(AccountsDirectory);
         Directory.CreateDirectory(IdeProfilesDirectory);
+        Directory.CreateDirectory(WidgetLibrariesDirectory);
         Directory.CreateDirectory(CommandsDirectory);
         Directory.CreateDirectory(LogsDirectory);
 
@@ -183,6 +185,10 @@ internal static class AccountManager
             {
                 RestartAntigravityWithActiveAccount();
             }
+            else if (string.Equals(command, "addWidgetLibrary", StringComparison.OrdinalIgnoreCase))
+            {
+                OpenWidgetLibrariesFolder();
+            }
             else
             {
                 Log($"Unknown account command ignored: {command}");
@@ -234,6 +240,29 @@ internal static class AccountManager
         NotifyChanged();
         StartCodexLogin(account);
         Log($"Added Codex account profile: {account.Id}");
+    }
+
+    private static void OpenWidgetLibrariesFolder()
+    {
+        Directory.CreateDirectory(WidgetLibrariesDirectory);
+        var readmePath = Path.Combine(WidgetLibrariesDirectory, "README.txt");
+        if (!File.Exists(readmePath))
+        {
+            File.WriteAllText(
+                readmePath,
+                "TaskbarStats widget design packs will live in this folder." +
+                Environment.NewLine +
+                "The current build includes built-in Codex Status and Static Weather designs." +
+                Environment.NewLine,
+                Encoding.UTF8);
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = WidgetLibrariesDirectory,
+            UseShellExecute = true
+        });
+        Log($"Opened widget libraries folder: {WidgetLibrariesDirectory}");
     }
 
     private static void DeleteActiveAccount()

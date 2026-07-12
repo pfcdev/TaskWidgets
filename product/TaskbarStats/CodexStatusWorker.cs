@@ -807,8 +807,7 @@ static void WriteStatus(CodexStatus status)
 
 static string GetStatusDirectory()
 {
-    var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    return Path.Combine(localAppData, "TaskbarStats");
+    return AppPaths.AppDirectory;
 }
 
 static string GetStatusPath() => Path.Combine(GetStatusDirectory(), "codex-status.json");
