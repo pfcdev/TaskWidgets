@@ -20,6 +20,9 @@ internal static class AccountManager
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string SettingsPath = Path.Combine(AppDirectory, "settings.json");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");
+    private static readonly string RealCodexHome = Path.Combine(UserProfile, ".codex");
+    private static readonly string MaterializedAccountPath =
+        Path.Combine(AppDirectory, "active-codex-account.txt");
 
     public static void Initialize()
     {
@@ -58,10 +61,17 @@ internal static class AccountManager
                 string.Equals(item.Id, settings.ActiveAccountId, StringComparison.OrdinalIgnoreCase)) ??
                           settings.Accounts.FirstOrDefault() ??
                           CreateDefaultAccount();
+            var codexHome = ExpandPath(account.CodexHome);
+            if (string.Equals(ReadMaterializedAccountId(), account.Id,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                codexHome = RealCodexHome;
+            }
+
             return new AccountSnapshot(
                 account.Id,
                 account.Label,
-                ExpandPath(account.CodexHome));
+                codexHome);
         }
     }
 
@@ -216,8 +226,7 @@ internal static class AccountManager
             return;
         }
 
-        var runningIdeProcesses = GetAntigravityProcesses(idePath).ToArray();
-        var mainWindows = runningIdeProcesses
+        var mainWindows = GetAntigravityProcesses(idePath)
             .Where(process => process.MainWindowHandle != IntPtr.Zero)
             .ToArray();
 
@@ -236,37 +245,125 @@ internal static class AccountManager
                 }
             }
 
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(45);
-            while (DateTimeOffset.UtcNow < deadline)
-            {
-                if (GetAntigravityProcesses(idePath).All(process =>
-                    {
-                        using (process)
-                        {
-                            return process.HasExited;
-                        }
-                    }))
-                {
-                    break;
-                }
+            DisposeProcesses(mainWindows);
 
-                Thread.Sleep(500);
+            if (!WaitForAntigravityMainWindowsToClose(idePath, TimeSpan.FromSeconds(45)))
+            {
+                Log("Restart IDE aborted: Antigravity main window did not close cleanly");
+                return;
             }
         }
-
-        var survivors = GetAntigravityProcesses(idePath).ToArray();
-        if (survivors.Length > 0)
+        else
         {
-            Log("Restart IDE aborted: Antigravity did not close cleanly");
-            foreach (var process in survivors)
-            {
-                process.Dispose();
-            }
+            DisposeProcesses(mainWindows);
+        }
 
+        TerminateRemainingAntigravityHelpers(idePath);
+
+        if (!MaterializeCodexAccount(activeAccount))
+        {
+            Log($"Restart IDE aborted: failed to materialize Codex account {activeAccount.Id}");
             return;
         }
 
         StartAntigravity(idePath, activeAccount);
+    }
+
+    private static bool WaitForAntigravityMainWindowsToClose(string idePath, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var mainWindows = GetAntigravityProcesses(idePath)
+                .Where(process => process.MainWindowHandle != IntPtr.Zero)
+                .ToArray();
+            if (mainWindows.Length == 0)
+            {
+                return true;
+            }
+
+            DisposeProcesses(mainWindows);
+            Thread.Sleep(500);
+        }
+
+        var remainingMainWindows = GetAntigravityProcesses(idePath)
+            .Where(process => process.MainWindowHandle != IntPtr.Zero)
+            .ToArray();
+        foreach (var process in remainingMainWindows)
+        {
+            try
+            {
+                Log($"Antigravity main window still open: pid={process.Id}");
+            }
+            catch
+            {
+                // Ignore logging races during shutdown.
+            }
+        }
+
+        DisposeProcesses(remainingMainWindows);
+        return false;
+    }
+
+    private static void TerminateRemainingAntigravityHelpers(string idePath)
+    {
+        var helpers = GetAntigravityProcesses(idePath)
+            .Where(process => process.MainWindowHandle == IntPtr.Zero)
+            .ToArray();
+        if (helpers.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var process in helpers)
+        {
+            try
+            {
+                if (process.HasExited)
+                {
+                    continue;
+                }
+
+                Log($"Terminating Antigravity helper before account restart: pid={process.Id}");
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // Process already exited.
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to terminate Antigravity helper pid={process.Id}: {ex.Message}");
+            }
+        }
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        foreach (var process in helpers)
+        {
+            try
+            {
+                var remaining = deadline - DateTimeOffset.UtcNow;
+                if (remaining > TimeSpan.Zero && !process.HasExited)
+                {
+                    process.WaitForExit((int)Math.Min(remaining.TotalMilliseconds, int.MaxValue));
+                }
+            }
+            catch
+            {
+                // Best effort. The next launch should still get a clean profile
+                // if Electron's singleton helper has exited.
+            }
+        }
+
+        DisposeProcesses(helpers);
+    }
+
+    private static void DisposeProcesses(IEnumerable<Process> processes)
+    {
+        foreach (var process in processes)
+        {
+            process.Dispose();
+        }
     }
 
     private static IEnumerable<Process> GetAntigravityProcesses(string idePath)
@@ -325,10 +422,7 @@ internal static class AccountManager
 
     private static void StartAntigravity(string idePath, AccountSnapshot account)
     {
-        var codexHome = ExpandPath(account.CodexHome);
-        var ideProfile = GetIdeProfilePath(account);
-        Directory.CreateDirectory(codexHome);
-        Directory.CreateDirectory(ideProfile);
+        Directory.CreateDirectory(RealCodexHome);
 
         var info = new ProcessStartInfo
         {
@@ -336,21 +430,162 @@ internal static class AccountManager
             UseShellExecute = false,
             WorkingDirectory = Path.GetDirectoryName(idePath) ?? AppDirectory
         };
-        info.ArgumentList.Add("--user-data-dir");
-        info.ArgumentList.Add(ideProfile);
-        info.Environment["CODEX_HOME"] = codexHome;
-        info.Environment["CODEX_SQLITE_HOME"] = codexHome;
+        info.Environment["CODEX_HOME"] = RealCodexHome;
+        info.Environment["CODEX_SQLITE_HOME"] = RealCodexHome;
 
         try
         {
             Process.Start(info);
-            Log($"Started Antigravity with Codex account {account.Id}: codexHome={codexHome}; ideProfile={ideProfile}");
+            Log($"Started Antigravity with Codex account {account.Id}: codexHome={RealCodexHome}");
         }
         catch (Exception ex)
         {
             Log($"Failed to start Antigravity with account {account.Id}: {ex.Message}");
         }
     }
+
+    private static bool MaterializeCodexAccount(AccountSnapshot targetAccount)
+    {
+        try
+        {
+            var targetStorage = GetStoredCodexHome(targetAccount);
+            Directory.CreateDirectory(targetStorage);
+
+            var currentAccountId = ReadMaterializedAccountId();
+            if (string.Equals(currentAccountId, targetAccount.Id,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"Codex account already materialized: {targetAccount.Id}");
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(currentAccountId))
+            {
+                var currentStorage = GetStoredCodexHome(currentAccountId);
+                if (!PathsEqual(currentStorage, RealCodexHome) &&
+                    Directory.Exists(RealCodexHome))
+                {
+                    Directory.CreateDirectory(currentStorage);
+                    if (!MirrorDirectory(RealCodexHome, currentStorage))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (!MirrorDirectory(targetStorage, RealCodexHome))
+            {
+                return false;
+            }
+
+            File.WriteAllText(MaterializedAccountPath, targetAccount.Id,
+                Encoding.UTF8);
+            Log($"Codex account materialized: {targetAccount.Id} -> {RealCodexHome}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to materialize Codex account {targetAccount.Id}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string ReadMaterializedAccountId()
+    {
+        try
+        {
+            if (File.Exists(MaterializedAccountPath))
+            {
+                var value = File.ReadAllText(MaterializedAccountPath, Encoding.UTF8)
+                    .Trim();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to read materialized Codex account marker: {ex.Message}");
+        }
+
+        return DefaultAccountId;
+    }
+
+    private static string GetStoredCodexHome(AccountSnapshot account) =>
+        GetStoredCodexHome(account.Id, account.CodexHome);
+
+    private static string GetStoredCodexHome(string accountId, string? codexHome = null)
+    {
+        if (string.Equals(accountId, DefaultAccountId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine(AccountsDirectory, DefaultAccountId, "codex");
+        }
+
+        return ExpandPath(codexHome ??
+                          Path.Combine(AccountsDirectory,
+                              SanitizePathSegment(accountId), "codex"));
+    }
+
+    private static bool MirrorDirectory(string source, string destination)
+    {
+        if (PathsEqual(source, destination))
+        {
+            return true;
+        }
+
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(destination);
+
+        var info = new ProcessStartInfo
+        {
+            FileName = "robocopy.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        info.ArgumentList.Add(source);
+        info.ArgumentList.Add(destination);
+        info.ArgumentList.Add("/MIR");
+        info.ArgumentList.Add("/FFT");
+        info.ArgumentList.Add("/R:2");
+        info.ArgumentList.Add("/W:1");
+        info.ArgumentList.Add("/NFL");
+        info.ArgumentList.Add("/NDL");
+        info.ArgumentList.Add("/NP");
+
+        try
+        {
+            using var process = Process.Start(info);
+            if (process == null)
+            {
+                Log($"robocopy failed to start: {source} -> {destination}");
+                return false;
+            }
+
+            process.WaitForExit();
+            if (process.ExitCode >= 8)
+            {
+                Log($"robocopy failed with exit code {process.ExitCode}: {source} -> {destination}");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"robocopy error: {source} -> {destination}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool PathsEqual(string left, string right) =>
+        string.Equals(
+            Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
 
     private static string GetIdeProfilePath(AccountSnapshot account)
     {
