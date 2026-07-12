@@ -681,64 +681,186 @@ std::vector<CodexAccountInfo> ReadCodexAccounts() {
     return accounts;
 }
 
+std::wstring MakeAccountDisplayName(const CodexAccountInfo& account) {
+    std::wstring label = account.label;
+    if (!account.email.empty()) {
+        label += L" (";
+        label += account.email;
+        label += L")";
+    }
+
+    return label;
+}
+
+wuxc::TextBlock MakeMenuText(const std::wstring& value,
+                             double fontSize,
+                             winrt::Windows::UI::Color color) {
+    wuxc::TextBlock text;
+    text.Text(value);
+    text.FontSize(fontSize);
+    text.Foreground(wuxm::SolidColorBrush(color));
+    text.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    text.TextAlignment(wux::TextAlignment::Left);
+    text.HorizontalAlignment(wux::HorizontalAlignment::Stretch);
+    return text;
+}
+
+wuxc::FontIcon MakeMenuIcon(PCWSTR glyph,
+                            winrt::Windows::UI::Color color,
+                            double fontSize = 13) {
+    wuxc::FontIcon icon;
+    icon.Glyph(glyph);
+    icon.FontFamily(wuxm::FontFamily(L"Segoe MDL2 Assets"));
+    icon.FontSize(fontSize);
+    icon.Width(18);
+    icon.Height(18);
+    icon.Foreground(wuxm::SolidColorBrush(color));
+    icon.VerticalAlignment(wux::VerticalAlignment::Center);
+    return icon;
+}
+
+wuxc::Button MakeMenuButton(wux::UIElement const& content, double minHeight) {
+    wuxc::Button button;
+    button.Content(content);
+    button.MinHeight(minHeight);
+    button.HorizontalAlignment(wux::HorizontalAlignment::Stretch);
+    button.HorizontalContentAlignment(wux::HorizontalAlignment::Stretch);
+    button.Padding(wux::ThicknessHelper::FromLengths(8, 5, 8, 5));
+    button.Margin(wux::ThicknessHelper::FromLengths(0, 1, 0, 1));
+    button.Background(MakeBrush(0x00, 0x00, 0x00, 0x00));
+    button.BorderBrush(MakeBrush(0x00, 0x00, 0x00, 0x00));
+    button.BorderThickness(wux::ThicknessHelper::FromUniformLength(0));
+    return button;
+}
+
+wux::UIElement MakeAccountMenuContent(const CodexAccountInfo& account) {
+    wuxc::Grid row;
+    row.Width(292);
+    row.MinHeight(48);
+
+    wuxc::ColumnDefinition stripeColumn;
+    stripeColumn.Width(wux::GridLengthHelper::FromPixels(4));
+    wuxc::ColumnDefinition textColumn;
+    textColumn.Width(wux::GridLengthHelper::FromPixels(246));
+    wuxc::ColumnDefinition iconColumn;
+    iconColumn.Width(wux::GridLengthHelper::Auto());
+    row.ColumnDefinitions().Append(stripeColumn);
+    row.ColumnDefinitions().Append(textColumn);
+    row.ColumnDefinitions().Append(iconColumn);
+
+    wuxc::Border stripe;
+    stripe.Width(3);
+    stripe.Margin(wux::ThicknessHelper::FromLengths(0, 4, 8, 4));
+    stripe.Background(account.active ? MakeBrush(0xFF, 0x38, 0xBD, 0xF8)
+                                     : MakeBrush(0x00, 0x00, 0x00, 0x00));
+    wuxc::Grid::SetColumn(stripe, 0);
+
+    wuxc::StackPanel textStack;
+    textStack.Orientation(wuxc::Orientation::Vertical);
+    textStack.VerticalAlignment(wux::VerticalAlignment::Center);
+    textStack.Margin(wux::ThicknessHelper::FromLengths(8, 0, 6, 0));
+
+    auto title = MakeMenuText(
+        MakeAccountDisplayName(account),
+        12,
+        account.active ? winrt::Windows::UI::Color{0xFF, 0xF8, 0xFA, 0xFC}
+                       : winrt::Windows::UI::Color{0xE8, 0xF8, 0xFA, 0xFC});
+
+    auto metrics = MakeMenuText(
+        account.rateLimitText.empty() ? L"-- -- -- --" : account.rateLimitText,
+        11,
+        account.active ? winrt::Windows::UI::Color{0xFF, 0x7D, 0xD3, 0xFC}
+                       : winrt::Windows::UI::Color{0xB8, 0x94, 0xA3, 0xB8});
+    metrics.Margin(wux::ThicknessHelper::FromLengths(0, 2, 0, 0));
+
+    textStack.Children().Append(title.as<wux::UIElement>());
+    textStack.Children().Append(metrics.as<wux::UIElement>());
+    wuxc::Grid::SetColumn(textStack, 1);
+
+    auto icon = MakeMenuIcon(account.active ? L"\xE73E" : L"\xE7C3",
+                             account.active
+                                 ? winrt::Windows::UI::Color{0xFF, 0x38, 0xBD, 0xF8}
+                                 : winrt::Windows::UI::Color{0x80, 0x94, 0xA3, 0xB8},
+                             12);
+    icon.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    wuxc::Grid::SetColumn(icon, 2);
+
+    row.Children().Append(stripe.as<wux::UIElement>());
+    row.Children().Append(textStack.as<wux::UIElement>());
+    row.Children().Append(icon.as<wux::UIElement>());
+    return row;
+}
+
+wux::UIElement MakeActionMenuContent(PCWSTR glyph, PCWSTR label) {
+    wuxc::StackPanel row;
+    row.Orientation(wuxc::Orientation::Horizontal);
+    row.Width(292);
+
+    auto icon = MakeMenuIcon(glyph, winrt::Windows::UI::Color{0xCC, 0xF8, 0xFA, 0xFC}, 12);
+    icon.Margin(wux::ThicknessHelper::FromLengths(1, 0, 8, 0));
+
+    auto text = MakeMenuText(label, 12,
+                             winrt::Windows::UI::Color{0xF0, 0xF8, 0xFA, 0xFC});
+    text.VerticalAlignment(wux::VerticalAlignment::Center);
+
+    row.Children().Append(icon.as<wux::UIElement>());
+    row.Children().Append(text.as<wux::UIElement>());
+    return row;
+}
+
+void AppendActionMenuButton(wuxc::StackPanel const& panel,
+                            wuxc::Flyout const& flyout,
+                            PCWSTR glyph,
+                            PCWSTR label,
+                            PCWSTR command) {
+    auto button = MakeMenuButton(MakeActionMenuContent(glyph, label), 34);
+    button.Click([flyout, command](auto const&, auto const&) {
+        WriteTaskbarStatsCommand(command);
+        flyout.Hide();
+    });
+    panel.Children().Append(button.as<wux::UIElement>());
+}
+
 void ShowAccountMenu(wux::FrameworkElement const& root) {
     try {
-        auto flyout = wuxc::MenuFlyout();
+        auto flyout = wuxc::Flyout();
         auto accounts = ReadCodexAccounts();
 
-        for (const auto& account : accounts) {
-            auto item = wuxc::MenuFlyoutItem();
-            std::wstring label = account.active ? L"* " : L"";
-            label += account.label;
-            if (!account.email.empty()) {
-                label += L" (";
-                label += account.email;
-                label += L")";
-            }
-            if (!account.rateLimitText.empty()) {
-                label += L"\n";
-                label += account.rateLimitText;
-            }
-            item.Text(label);
+        wuxc::Border surface;
+        surface.Width(320);
+        surface.Padding(wux::ThicknessHelper::FromLengths(8, 8, 8, 8));
+        surface.Background(MakeBrush(0xF8, 0x1F, 0x23, 0x2A));
 
+        wuxc::StackPanel panel;
+        panel.Orientation(wuxc::Orientation::Vertical);
+
+        for (const auto& account : accounts) {
+            auto item = MakeMenuButton(MakeAccountMenuContent(account), 52);
             std::wstring accountId = account.id;
-            item.Click([accountId](auto const&, auto const&) {
+            item.Click([accountId, flyout](auto const&, auto const&) {
                 WriteTaskbarStatsCommand(L"switchAccount", accountId);
+                flyout.Hide();
             });
-            flyout.Items().Append(item);
+            panel.Children().Append(item.as<wux::UIElement>());
         }
 
-        auto separator = wuxc::MenuFlyoutSeparator();
-        flyout.Items().Append(separator);
+        wuxc::Border separator;
+        separator.Height(1);
+        separator.Margin(wux::ThicknessHelper::FromLengths(4, 6, 4, 6));
+        separator.Background(MakeBrush(0x34, 0xF8, 0xFA, 0xFC));
+        panel.Children().Append(separator.as<wux::UIElement>());
 
-        auto addItem = wuxc::MenuFlyoutItem();
-        addItem.Text(L"Add Codex account");
-        addItem.Click([](auto const&, auto const&) {
-            WriteTaskbarStatsCommand(L"addAccount");
-        });
-        flyout.Items().Append(addItem);
+        AppendActionMenuButton(panel, flyout, L"\xE710", L"Add Codex account",
+                               L"addAccount");
+        AppendActionMenuButton(panel, flyout, L"\xE77B", L"Login active Codex account",
+                               L"loginActiveAccount");
+        AppendActionMenuButton(panel, flyout, L"\xE74D", L"Delete active Codex account",
+                               L"deleteActiveAccount");
+        AppendActionMenuButton(panel, flyout, L"\xE72C", L"Restart IDE with active account",
+                               L"restartIde");
 
-        auto loginItem = wuxc::MenuFlyoutItem();
-        loginItem.Text(L"Login active Codex account");
-        loginItem.Click([](auto const&, auto const&) {
-            WriteTaskbarStatsCommand(L"loginActiveAccount");
-        });
-        flyout.Items().Append(loginItem);
-
-        auto deleteItem = wuxc::MenuFlyoutItem();
-        deleteItem.Text(L"Delete active Codex account");
-        deleteItem.Click([](auto const&, auto const&) {
-            WriteTaskbarStatsCommand(L"deleteActiveAccount");
-        });
-        flyout.Items().Append(deleteItem);
-
-        auto restartIdeItem = wuxc::MenuFlyoutItem();
-        restartIdeItem.Text(L"Restart IDE with active account");
-        restartIdeItem.Click([](auto const&, auto const&) {
-            WriteTaskbarStatsCommand(L"restartIde");
-        });
-        flyout.Items().Append(restartIdeItem);
-
+        surface.Child(panel.as<wux::UIElement>());
+        flyout.Content(surface.as<wux::UIElement>());
         wuxcp::FlyoutBase::SetAttachedFlyout(root, flyout);
         wuxcp::FlyoutBase::ShowAttachedFlyout(root);
     } catch (winrt::hresult_error const& ex) {
