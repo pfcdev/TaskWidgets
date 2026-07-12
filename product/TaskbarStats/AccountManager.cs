@@ -46,6 +46,7 @@ internal static class AccountManager
                 settings.ActiveAccountId = settings.Accounts[0].Id;
             }
 
+            RefreshAccountEmailsUnlocked(settings);
             WriteSettingsUnlocked(settings);
         }
     }
@@ -83,6 +84,7 @@ internal static class AccountManager
         {
             try
             {
+                RefreshAccountEmails();
                 foreach (var commandPath in Directory.EnumerateFiles(CommandsDirectory, "*.json")
                              .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
                 {
@@ -674,6 +676,7 @@ internal static class AccountManager
 
             File.WriteAllText(MaterializedAccountPath, targetAccount.Id,
                 Encoding.UTF8);
+            RefreshAccountEmails();
             Log($"Codex account auth materialized: {targetAccount.Id} -> {currentAuth}");
             return true;
         }
@@ -720,6 +723,111 @@ internal static class AccountManager
         return ExpandPath(codexHome ??
                           Path.Combine(AccountsDirectory,
                               SanitizePathSegment(accountId), "codex"));
+    }
+
+    private static void RefreshAccountEmails()
+    {
+        lock (SyncRoot)
+        {
+            var settings = ReadSettingsUnlocked();
+            if (RefreshAccountEmailsUnlocked(settings))
+            {
+                WriteSettingsUnlocked(settings);
+            }
+        }
+    }
+
+    private static bool RefreshAccountEmailsUnlocked(AccountSettings settings)
+    {
+        var changed = false;
+        foreach (var account in settings.Accounts)
+        {
+            var email = ReadAccountEmail(account) ?? "";
+            if (!string.Equals(account.Email, email, StringComparison.Ordinal))
+            {
+                account.Email = email;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private static string? ReadAccountEmail(AccountSettings.Account account)
+    {
+        var materializedAccountId = ReadMaterializedAccountId();
+        if (string.Equals(materializedAccountId, account.Id,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var materializedEmail = ReadCodexAuthEmail(
+                Path.Combine(RealCodexHome, "auth.json"));
+            if (!string.IsNullOrWhiteSpace(materializedEmail))
+            {
+                return materializedEmail;
+            }
+        }
+
+        var storedEmail = ReadCodexAuthEmail(
+            Path.Combine(GetStoredCodexHome(account.Id, account.CodexHome),
+                "auth.json"));
+        if (!string.IsNullOrWhiteSpace(storedEmail))
+        {
+            return storedEmail;
+        }
+
+        if (string.Equals(account.Id, DefaultAccountId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return ReadCodexAuthEmail(Path.Combine(RealCodexHome, "auth.json"));
+        }
+
+        return null;
+    }
+
+    private static string? ReadCodexAuthEmail(string authPath)
+    {
+        try
+        {
+            if (!File.Exists(authPath))
+            {
+                return null;
+            }
+
+            var node = JsonNode.Parse(File.ReadAllText(authPath, Encoding.UTF8));
+            var idToken = node?["tokens"]?["id_token"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(idToken))
+            {
+                return null;
+            }
+
+            var parts = idToken.Split('.');
+            if (parts.Length < 2)
+            {
+                return null;
+            }
+
+            var payload = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
+            var payloadNode = JsonNode.Parse(payload);
+            var email = payloadNode?["email"]?.GetValue<string>() ??
+                        payloadNode?["preferred_username"]?.GetValue<string>();
+            return string.IsNullOrWhiteSpace(email) ? null : email.Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[] Base64UrlDecode(string value)
+    {
+        var base64 = value.Replace('-', '+').Replace('_', '/');
+        var padding = base64.Length % 4;
+        if (padding > 0)
+        {
+            base64 = base64.PadRight(base64.Length + 4 - padding, '=');
+        }
+
+        return Convert.FromBase64String(base64);
     }
 
     private static string GetIdeProfilePath(AccountSnapshot account)
@@ -818,6 +926,7 @@ internal static class AccountManager
         {
             public string Id { get; set; } = "";
             public string Label { get; set; } = "";
+            public string Email { get; set; } = "";
             public string CodexHome { get; set; } = "";
         }
     }

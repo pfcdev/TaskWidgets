@@ -331,6 +331,7 @@ void ShowAccountMenu(wux::FrameworkElement const& root);
 struct CodexAccountInfo {
     std::wstring id;
     std::wstring label;
+    std::wstring email;
     bool active{};
 };
 
@@ -652,6 +653,7 @@ std::vector<CodexAccountInfo> ReadCodexAccounts() {
             CodexAccountInfo account;
             ExtractJsonString(object, "id", account.id);
             ExtractJsonString(object, "label", account.label);
+            ExtractJsonString(object, "email", account.email);
             if (!account.id.empty()) {
                 if (account.label.empty()) {
                     account.label = account.id;
@@ -666,7 +668,7 @@ std::vector<CodexAccountInfo> ReadCodexAccounts() {
     }
 
     if (accounts.empty()) {
-        accounts.push_back({L"default", L"Default", true});
+        accounts.push_back({L"default", L"Default", L"", true});
     } else if (std::none_of(accounts.begin(), accounts.end(),
                             [](const CodexAccountInfo& account) {
                                 return account.active;
@@ -686,6 +688,11 @@ void ShowAccountMenu(wux::FrameworkElement const& root) {
             auto item = wuxc::MenuFlyoutItem();
             std::wstring label = account.active ? L"* " : L"";
             label += account.label;
+            if (!account.email.empty()) {
+                label += L" (";
+                label += account.email;
+                label += L")";
+            }
             item.Text(label);
 
             std::wstring accountId = account.id;
