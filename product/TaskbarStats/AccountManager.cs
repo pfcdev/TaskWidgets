@@ -109,6 +109,10 @@ internal static class AccountManager
             {
                 AddAccountAndStartLogin();
             }
+            else if (string.Equals(command, "loginActiveAccount", StringComparison.OrdinalIgnoreCase))
+            {
+                LoginActiveAccount();
+            }
             else if (string.Equals(command, "switchAccount", StringComparison.OrdinalIgnoreCase))
             {
                 var accountId = node?["accountId"]?.GetValue<string>();
@@ -173,6 +177,27 @@ internal static class AccountManager
         Log($"Added Codex account profile: {account.Id}");
     }
 
+    private static void LoginActiveAccount()
+    {
+        AccountSettings.Account? account;
+        lock (SyncRoot)
+        {
+            var settings = ReadSettingsUnlocked();
+            account = settings.Accounts.FirstOrDefault(item =>
+                string.Equals(item.Id, settings.ActiveAccountId,
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (account is null)
+        {
+            Log("Login active Codex account ignored: no active account found");
+            return;
+        }
+
+        StartCodexLogin(account);
+        Log($"Started login for active Codex account profile: {account.Id}");
+    }
+
     private static void SwitchAccount(string accountId)
     {
         lock (SyncRoot)
@@ -201,7 +226,7 @@ internal static class AccountManager
         var info = new ProcessStartInfo
         {
             FileName = "powershell.exe",
-            Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"$env:CODEX_HOME='{escapedHome}'; $env:CODEX_SQLITE_HOME='{escapedHome}'; codex login\"",
+            Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"$env:CODEX_HOME='{escapedHome}'; $env:CODEX_SQLITE_HOME='{escapedHome}'; Write-Host 'TaskbarStats Codex account login: choose the target account in the device-auth flow.'; codex login --device-auth\"",
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Normal
         };
@@ -510,9 +535,11 @@ internal static class AccountManager
 
     private static void StartAntigravity(string idePath, AccountSnapshot account)
     {
+        var ideProfile = GetIdeProfilePath(account);
         Directory.CreateDirectory(RealCodexHome);
+        Directory.CreateDirectory(ideProfile);
 
-        if (LaunchAntigravityFromShell(idePath, account, "primary") &&
+        if (LaunchAntigravityWithProfile(idePath, account, ideProfile, "primary") &&
             WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
         {
             return;
@@ -520,7 +547,7 @@ internal static class AccountManager
 
         Log($"Antigravity did not show a main window after primary launch for account {account.Id}; retrying");
         Thread.Sleep(2500);
-        if (LaunchAntigravityFromShell(idePath, account, "retry") &&
+        if (LaunchAntigravityFromShell(idePath, account, ideProfile, "retry") &&
             WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
         {
             return;
@@ -529,13 +556,45 @@ internal static class AccountManager
         Log($"Antigravity launch did not produce a visible main window for account {account.Id}");
     }
 
+    private static bool LaunchAntigravityWithProfile(string idePath,
+                                                     AccountSnapshot account,
+                                                     string ideProfile,
+                                                     string attempt)
+    {
+        var info = new ProcessStartInfo
+        {
+            FileName = idePath,
+            UseShellExecute = false,
+            WorkingDirectory = Path.GetDirectoryName(idePath) ?? AppDirectory,
+            WindowStyle = ProcessWindowStyle.Normal
+        };
+        info.ArgumentList.Add("--user-data-dir");
+        info.ArgumentList.Add(ideProfile);
+        info.Environment["CODEX_HOME"] = RealCodexHome;
+        info.Environment["CODEX_SQLITE_HOME"] = RealCodexHome;
+
+        try
+        {
+            var process = Process.Start(info);
+            Log($"Started Antigravity ({attempt}) with Codex account {account.Id}: pid={process?.Id.ToString() ?? "unknown"}; codexHome={RealCodexHome}; ideProfile={ideProfile}");
+            return process != null;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to start Antigravity ({attempt}) with profile for account {account.Id}: {ex.Message}");
+            return false;
+        }
+    }
+
     private static bool LaunchAntigravityFromShell(string idePath,
                                                    AccountSnapshot account,
+                                                   string ideProfile,
                                                    string attempt)
     {
         var info = new ProcessStartInfo
         {
             FileName = idePath,
+            Arguments = $"--user-data-dir \"{ideProfile}\"",
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(idePath) ?? AppDirectory,
             WindowStyle = ProcessWindowStyle.Normal
@@ -544,7 +603,7 @@ internal static class AccountManager
         try
         {
             var process = Process.Start(info);
-            Log($"Started Antigravity ({attempt}) with Codex account {account.Id}: pid={process?.Id.ToString() ?? "unknown"}; codexHome={RealCodexHome}");
+            Log($"Started Antigravity ({attempt}) with Codex account {account.Id}: pid={process?.Id.ToString() ?? "unknown"}; codexHome={RealCodexHome}; ideProfile={ideProfile}");
             return process != null;
         }
         catch (Exception ex)

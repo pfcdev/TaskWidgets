@@ -705,6 +705,13 @@ void ShowAccountMenu(wux::FrameworkElement const& root) {
         });
         flyout.Items().Append(addItem);
 
+        auto loginItem = wuxc::MenuFlyoutItem();
+        loginItem.Text(L"Login active Codex account");
+        loginItem.Click([](auto const&, auto const&) {
+            WriteTaskbarStatsCommand(L"loginActiveAccount");
+        });
+        flyout.Items().Append(loginItem);
+
         auto restartIdeItem = wuxc::MenuFlyoutItem();
         restartIdeItem.Text(L"Restart IDE with active account");
         restartIdeItem.Click([](auto const&, auto const&) {
