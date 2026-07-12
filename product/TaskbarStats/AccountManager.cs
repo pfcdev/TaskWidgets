@@ -226,7 +226,7 @@ internal static class AccountManager
         var info = new ProcessStartInfo
         {
             FileName = "powershell.exe",
-            Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"$env:CODEX_HOME='{escapedHome}'; $env:CODEX_SQLITE_HOME='{escapedHome}'; Write-Host 'TaskbarStats Codex account login: choose the target account in the device-auth flow.'; codex login --device-auth\"",
+            Arguments = $"-NoExit -ExecutionPolicy Bypass -Command \"$env:CODEX_HOME='{escapedHome}'; $env:CODEX_SQLITE_HOME='{escapedHome}'; Write-Host 'TaskbarStats Codex account login: choose the target account in the browser flow.'; codex login\"",
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Normal
         };
