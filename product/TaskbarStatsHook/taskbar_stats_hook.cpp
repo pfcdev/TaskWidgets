@@ -2309,7 +2309,13 @@ void UpdateExpandedTaskRows(wux::UIElement const& root,
 
 void SetExpandedMode(wux::UIElement const& root, bool expanded) {
     if (ReadActiveWidgetDesign() != L"codex-status") {
-        expanded = false;
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                           wux::Visibility::Visible);
+        return;
     }
 
     if (expanded && GetAntigravityProjectTitles().size() <= 1) {
