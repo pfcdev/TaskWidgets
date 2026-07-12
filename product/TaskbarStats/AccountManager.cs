@@ -115,6 +115,10 @@ internal static class AccountManager
             {
                 LoginActiveAccount();
             }
+            else if (string.Equals(command, "deleteActiveAccount", StringComparison.OrdinalIgnoreCase))
+            {
+                DeleteActiveAccount();
+            }
             else if (string.Equals(command, "switchAccount", StringComparison.OrdinalIgnoreCase))
             {
                 var accountId = node?["accountId"]?.GetValue<string>();
@@ -177,6 +181,66 @@ internal static class AccountManager
 
         StartCodexLogin(account);
         Log($"Added Codex account profile: {account.Id}");
+    }
+
+    private static void DeleteActiveAccount()
+    {
+        AccountSettings.Account? accountToDelete = null;
+        AccountSettings.Account? fallbackAccount = null;
+
+        lock (SyncRoot)
+        {
+            var settings = ReadSettingsUnlocked();
+            accountToDelete = settings.Accounts.FirstOrDefault(item =>
+                string.Equals(item.Id, settings.ActiveAccountId,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (accountToDelete is null)
+            {
+                Log("Delete active Codex account ignored: no active account found");
+                return;
+            }
+
+            if (string.Equals(accountToDelete.Id, DefaultAccountId,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Log("Delete active Codex account ignored: default account cannot be deleted");
+                return;
+            }
+
+            fallbackAccount = settings.Accounts.FirstOrDefault(item =>
+                string.Equals(item.Id, DefaultAccountId,
+                    StringComparison.OrdinalIgnoreCase)) ?? CreateDefaultAccount();
+
+            settings.Accounts.RemoveAll(item =>
+                string.Equals(item.Id, accountToDelete.Id,
+                    StringComparison.OrdinalIgnoreCase));
+            if (settings.Accounts.Count == 0)
+            {
+                settings.Accounts.Add(fallbackAccount);
+            }
+
+            settings.ActiveAccountId = fallbackAccount.Id;
+            RefreshAccountEmailsUnlocked(settings);
+            WriteSettingsUnlocked(settings);
+        }
+
+        if (string.Equals(ReadMaterializedAccountId(), accountToDelete.Id,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            MaterializeCodexAccount(new AccountSnapshot(
+                fallbackAccount.Id,
+                fallbackAccount.Label,
+                ExpandPath(fallbackAccount.CodexHome)));
+        }
+
+        DeleteDirectoryBestEffort(
+            Path.Combine(AccountsDirectory, SanitizePathSegment(accountToDelete.Id)));
+        DeleteDirectoryBestEffort(GetIdeProfilePath(new AccountSnapshot(
+            accountToDelete.Id,
+            accountToDelete.Label,
+            ExpandPath(accountToDelete.CodexHome))));
+        Log($"Deleted Codex account profile: {accountToDelete.Id}");
     }
 
     private static void LoginActiveAccount()
@@ -839,6 +903,21 @@ internal static class AccountManager
         }
 
         return Path.Combine(IdeProfilesDirectory, SanitizePathSegment(account.Id));
+    }
+
+    private static void DeleteDirectoryBestEffort(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to delete directory {path}: {ex.Message}");
+        }
     }
 
     private static string SanitizePathSegment(string value)

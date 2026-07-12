@@ -719,6 +719,13 @@ void ShowAccountMenu(wux::FrameworkElement const& root) {
         });
         flyout.Items().Append(loginItem);
 
+        auto deleteItem = wuxc::MenuFlyoutItem();
+        deleteItem.Text(L"Delete active Codex account");
+        deleteItem.Click([](auto const&, auto const&) {
+            WriteTaskbarStatsCommand(L"deleteActiveAccount");
+        });
+        flyout.Items().Append(deleteItem);
+
         auto restartIdeItem = wuxc::MenuFlyoutItem();
         restartIdeItem.Text(L"Restart IDE with active account");
         restartIdeItem.Click([](auto const&, auto const&) {
