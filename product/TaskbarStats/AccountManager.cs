@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace TaskbarStatsProduct;
 
@@ -443,6 +444,7 @@ internal static class AccountManager
         }
 
         var ideProfile = GetIdeProfilePath(account);
+        EnsureAntigravityUsesSnapshotCompatibleShell(ideProfile);
         if (LaunchIdeCommand(idePath, account, ideProfile,
                 "workbench.action.reloadWindow", "reload-window"))
         {
@@ -735,6 +737,7 @@ internal static class AccountManager
         var ideProfile = GetIdeProfilePath(account);
         Directory.CreateDirectory(RealCodexHome);
         Directory.CreateDirectory(ideProfile);
+        EnsureAntigravityUsesSnapshotCompatibleShell(ideProfile);
 
         if (LaunchAntigravityWithProfile(idePath, account, ideProfile, "primary") &&
             WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
@@ -769,6 +772,7 @@ internal static class AccountManager
         info.ArgumentList.Add(ideProfile);
         info.Environment["CODEX_HOME"] = RealCodexHome;
         info.Environment["CODEX_SQLITE_HOME"] = RealCodexHome;
+        ApplySnapshotCompatibleShellEnvironment(info);
 
         try
         {
@@ -830,6 +834,7 @@ internal static class AccountManager
         info.ArgumentList.Add(command);
         info.Environment["CODEX_HOME"] = RealCodexHome;
         info.Environment["CODEX_SQLITE_HOME"] = RealCodexHome;
+        ApplySnapshotCompatibleShellEnvironment(info);
 
         try
         {
@@ -930,23 +935,60 @@ internal static class AccountManager
 
             var lines = File.ReadAllLines(configPath, Encoding.UTF8);
             var filtered = lines
-                .Where(line => !line.TrimStart().StartsWith("skills =",
-                    StringComparison.OrdinalIgnoreCase))
+                .Where(line =>
+                {
+                    var trimmed = line.TrimStart();
+                    return !trimmed.StartsWith("skills =",
+                               StringComparison.OrdinalIgnoreCase) &&
+                           !trimmed.StartsWith("thread_tools =",
+                               StringComparison.OrdinalIgnoreCase) &&
+                           !trimmed.StartsWith("ghost_snapshot =",
+                               StringComparison.OrdinalIgnoreCase);
+                })
                 .ToArray();
-            if (filtered.Length == lines.Length)
+
+            var sanitized = EnsureTopLevelTomlValue(filtered,
+                "ghost_snapshot = false");
+            if (sanitized.SequenceEqual(lines))
             {
                 return;
             }
 
             var backupPath = $"{configPath}.bak-taskbarstats";
             File.Copy(configPath, backupPath, overwrite: true);
-            File.WriteAllLines(configPath, filtered, Encoding.UTF8);
-            Log($"Removed unsupported Codex config feature from {configPath}");
+            File.WriteAllLines(configPath, sanitized, Encoding.UTF8);
+            Log($"Sanitized unsupported Codex config and disabled ghost snapshot in {configPath}");
         }
         catch (Exception ex)
         {
             Log($"Failed to sanitize Codex config in {codexHome}: {ex.Message}");
         }
+    }
+
+    private static string[] EnsureTopLevelTomlValue(
+        string[] lines,
+        string valueLine)
+    {
+        var output = new List<string>(lines.Length + 1);
+        var inserted = false;
+
+        foreach (var line in lines)
+        {
+            if (!inserted && line.TrimStart().StartsWith('['))
+            {
+                output.Add(valueLine);
+                inserted = true;
+            }
+
+            output.Add(line);
+        }
+
+        if (!inserted)
+        {
+            output.Add(valueLine);
+        }
+
+        return output.ToArray();
     }
 
     private static string ReadMaterializedAccountId()
@@ -1129,6 +1171,75 @@ internal static class AccountManager
         }
 
         return Path.Combine(IdeProfilesDirectory, SanitizePathSegment(account.Id));
+    }
+
+    private static void EnsureAntigravityUsesSnapshotCompatibleShell(string ideProfile)
+    {
+        try
+        {
+            var userDirectory = Path.Combine(ideProfile, "User");
+            Directory.CreateDirectory(userDirectory);
+
+            var settingsPath = Path.Combine(userDirectory, "settings.json");
+            const string settingName = "terminal.integrated.defaultProfile.windows";
+            const string settingLine =
+                "  \"terminal.integrated.defaultProfile.windows\": \"Command Prompt\"";
+
+            if (!File.Exists(settingsPath))
+            {
+                File.WriteAllText(settingsPath,
+                    $"{{{Environment.NewLine}{settingLine}{Environment.NewLine}}}{Environment.NewLine}",
+                    Encoding.UTF8);
+                return;
+            }
+
+            var text = File.ReadAllText(settingsPath, Encoding.UTF8);
+            var replacementPattern =
+                $"\"{Regex.Escape(settingName)}\"\\s*:\\s*\"[^\"]*\"";
+            if (Regex.IsMatch(text, replacementPattern))
+            {
+                var updated = Regex.Replace(text, replacementPattern,
+                    $"\"{settingName}\": \"Command Prompt\"");
+                if (!string.Equals(text, updated, StringComparison.Ordinal))
+                {
+                    File.WriteAllText(settingsPath, updated, Encoding.UTF8);
+                }
+
+                return;
+            }
+
+            var insertIndex = text.LastIndexOf('}');
+            if (insertIndex < 0)
+            {
+                File.Copy(settingsPath, $"{settingsPath}.bak-taskbarstats",
+                    overwrite: true);
+                File.WriteAllText(settingsPath,
+                    $"{{{Environment.NewLine}{settingLine}{Environment.NewLine}}}{Environment.NewLine}",
+                    Encoding.UTF8);
+                return;
+            }
+
+            var prefix = text[..insertIndex].TrimEnd();
+            var suffix = text[insertIndex..];
+            var comma = prefix.TrimEnd().EndsWith('{') ? "" : ",";
+            var merged =
+                $"{prefix}{comma}{Environment.NewLine}{settingLine}{Environment.NewLine}{suffix}";
+            File.WriteAllText(settingsPath, merged, Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to update Antigravity terminal shell setting in {ideProfile}: {ex.Message}");
+        }
+    }
+
+    private static void ApplySnapshotCompatibleShellEnvironment(
+        ProcessStartInfo info)
+    {
+        var cmdPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+        info.Environment["ComSpec"] = cmdPath;
+        info.Environment["SHELL"] = cmdPath;
     }
 
     private static void DeleteDirectoryBestEffort(string path)
