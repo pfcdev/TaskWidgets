@@ -24,6 +24,7 @@ Unsupported builds should fail closed and log diagnostics.
 // ==/WindhawkModReadme==
 
 #include <windows.h>
+#include <windowsx.h>
 #include <ocidl.h>
 #include <xamlom.h>
 
@@ -327,6 +328,7 @@ wuxm::SolidColorBrush MakeBrush(BYTE a, BYTE r, BYTE g, BYTE b) {
 std::vector<std::wstring> GetAntigravityProjectTitles();
 void SetExpandedMode(wux::UIElement const& root, bool expanded);
 void ShowAccountMenu(wux::FrameworkElement const& root);
+HWND FindCurrentProcessTaskbarWindow();
 
 struct CodexAccountInfo {
     std::wstring id;
@@ -335,6 +337,16 @@ struct CodexAccountInfo {
     std::wstring rateLimitText;
     bool active{};
 };
+
+struct AccountMenuHitItem {
+    RECT rect{};
+    std::wstring command;
+    std::wstring accountId;
+};
+
+HWND g_accountMenuWindow = nullptr;
+std::vector<CodexAccountInfo> g_accountMenuAccounts;
+std::vector<AccountMenuHitItem> g_accountMenuHitItems;
 
 wuxc::FontIcon MakeNamedStateIcon(PCWSTR name) {
     wuxc::FontIcon icon;
@@ -821,49 +833,268 @@ void AppendActionMenuButton(wuxc::StackPanel const& panel,
     panel.Children().Append(button.as<wux::UIElement>());
 }
 
-void ShowAccountMenu(wux::FrameworkElement const& root) {
-    try {
-        auto flyout = wuxc::Flyout();
-        flyout.Placement(wuxcp::FlyoutPlacementMode::Top);
-        auto accounts = ReadCodexAccounts();
+void DrawPopupText(HDC dc,
+                   const std::wstring& text,
+                   RECT rect,
+                   COLORREF color,
+                   HFONT font,
+                   UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                                 DT_END_ELLIPSIS) {
+    SetTextColor(dc, color);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextW(dc, text.c_str(), -1, &rect, format);
+    SelectObject(dc, oldFont);
+}
 
-        wuxc::Border surface;
-        surface.Width(320);
-        surface.Padding(wux::ThicknessHelper::FromLengths(8, 8, 8, 8));
-        surface.Background(MakeBrush(0xF8, 0x1F, 0x23, 0x2A));
+void DrawAccountMenuPopup(HDC dc, RECT clientRect) {
+    HBRUSH background = CreateSolidBrush(RGB(31, 35, 42));
+    FillRect(dc, &clientRect, background);
+    DeleteObject(background);
 
-        wuxc::StackPanel panel;
-        panel.Orientation(wuxc::Orientation::Vertical);
+    SetBkMode(dc, TRANSPARENT);
 
-        for (const auto& account : accounts) {
-            auto item = MakeMenuButton(MakeAccountMenuContent(account), 52);
-            std::wstring accountId = account.id;
-            item.Click([accountId, flyout](auto const&, auto const&) {
-                WriteTaskbarStatsCommand(L"switchAccount", accountId);
-                flyout.Hide();
-            });
-            panel.Children().Append(item.as<wux::UIElement>());
+    HFONT titleFont = CreateFontW(
+        -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT detailFont = CreateFontW(
+        -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT iconFont = CreateFontW(
+        -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+
+    constexpr int width = 336;
+    constexpr int padding = 10;
+    constexpr int accountHeight = 56;
+    constexpr int actionHeight = 36;
+
+    int y = padding;
+    for (const auto& account : g_accountMenuAccounts) {
+        RECT row{padding, y, width - padding, y + accountHeight};
+        if (account.active) {
+            HBRUSH activeBrush = CreateSolidBrush(RGB(39, 47, 58));
+            FillRect(dc, &row, activeBrush);
+            DeleteObject(activeBrush);
+
+            RECT stripe{row.left, row.top + 6, row.left + 3, row.bottom - 6};
+            HBRUSH stripeBrush = CreateSolidBrush(RGB(56, 189, 248));
+            FillRect(dc, &stripe, stripeBrush);
+            DeleteObject(stripeBrush);
         }
 
-        wuxc::Border separator;
-        separator.Height(1);
-        separator.Margin(wux::ThicknessHelper::FromLengths(4, 6, 4, 6));
-        separator.Background(MakeBrush(0x34, 0xF8, 0xFA, 0xFC));
-        panel.Children().Append(separator.as<wux::UIElement>());
+        RECT titleRect{row.left + 12, row.top + 6, row.right - 34,
+                       row.top + 28};
+        RECT detailRect{row.left + 12, row.top + 28, row.right - 34,
+                        row.bottom - 5};
+        RECT iconRect{row.right - 27, row.top, row.right - 6, row.bottom};
 
-        AppendActionMenuButton(panel, flyout, L"\xE710", L"Add Codex account",
-                               L"addAccount");
-        AppendActionMenuButton(panel, flyout, L"\xE77B", L"Login active Codex account",
-                               L"loginActiveAccount");
-        AppendActionMenuButton(panel, flyout, L"\xE74D", L"Delete active Codex account",
-                               L"deleteActiveAccount");
-        AppendActionMenuButton(panel, flyout, L"\xE72C", L"Restart IDE with active account",
-                               L"restartIde");
+        DrawPopupText(dc, MakeAccountDisplayName(account), titleRect,
+                      account.active ? RGB(248, 250, 252) : RGB(225, 231, 238),
+                      titleFont);
+        DrawPopupText(dc,
+                      account.rateLimitText.empty() ? L"-- -- -- --"
+                                                    : account.rateLimitText,
+                      detailRect,
+                      account.active ? RGB(125, 211, 252)
+                                     : RGB(148, 163, 184),
+                      detailFont);
+        DrawPopupText(dc, account.active ? L"\xE73E" : L"\xE7C3", iconRect,
+                      account.active ? RGB(56, 189, 248)
+                                     : RGB(100, 116, 139),
+                      iconFont, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        y += accountHeight;
+    }
 
-        surface.Child(panel.as<wux::UIElement>());
-        flyout.Content(surface.as<wux::UIElement>());
-        wuxcp::FlyoutBase::SetAttachedFlyout(root, flyout);
-        wuxcp::FlyoutBase::ShowAttachedFlyout(root);
+    RECT separator{padding + 4, y + 5, width - padding - 4, y + 6};
+    HBRUSH separatorBrush = CreateSolidBrush(RGB(62, 70, 82));
+    FillRect(dc, &separator, separatorBrush);
+    DeleteObject(separatorBrush);
+    y += 12;
+
+    struct ActionRow {
+        PCWSTR glyph;
+        PCWSTR label;
+    };
+    constexpr ActionRow actions[] = {
+        {L"\xE710", L"Add Codex account"},
+        {L"\xE77B", L"Login active Codex account"},
+        {L"\xE74D", L"Delete active Codex account"},
+        {L"\xE72C", L"Restart IDE with active account"}};
+
+    for (const auto& action : actions) {
+        RECT row{padding, y, width - padding, y + actionHeight};
+        RECT iconRect{row.left + 8, row.top, row.left + 28, row.bottom};
+        RECT textRect{row.left + 36, row.top, row.right - 8, row.bottom};
+        DrawPopupText(dc, action.glyph, iconRect, RGB(203, 213, 225), iconFont,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawPopupText(dc, action.label, textRect, RGB(241, 245, 249), detailFont);
+        y += actionHeight;
+    }
+
+    DeleteObject(titleFont);
+    DeleteObject(detailFont);
+    DeleteObject(iconFont);
+}
+
+void RebuildAccountMenuHitItems(int width) {
+    g_accountMenuHitItems.clear();
+    constexpr int padding = 10;
+    constexpr int accountHeight = 56;
+    constexpr int actionHeight = 36;
+
+    int y = padding;
+    for (const auto& account : g_accountMenuAccounts) {
+        g_accountMenuHitItems.push_back(AccountMenuHitItem{
+            .rect = RECT{padding, y, width - padding, y + accountHeight},
+            .command = L"switchAccount",
+            .accountId = account.id,
+        });
+        y += accountHeight;
+    }
+
+    y += 12;
+    constexpr PCWSTR commands[] = {
+        L"addAccount",
+        L"loginActiveAccount",
+        L"deleteActiveAccount",
+        L"restartIde"};
+    for (PCWSTR command : commands) {
+        g_accountMenuHitItems.push_back(AccountMenuHitItem{
+            .rect = RECT{padding, y, width - padding, y + actionHeight},
+            .command = command,
+        });
+        y += actionHeight;
+    }
+}
+
+LRESULT CALLBACK AccountMenuWindowProc(HWND window,
+                                       UINT message,
+                                       WPARAM wParam,
+                                       LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(window, &ps);
+            RECT rect{};
+            GetClientRect(window, &rect);
+            DrawAccountMenuPopup(dc, rect);
+            EndPaint(window, &ps);
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            for (const auto& item : g_accountMenuHitItems) {
+                if (PtInRect(&item.rect, point)) {
+                    WriteTaskbarStatsCommand(item.command, item.accountId);
+                    DestroyWindow(window);
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_DESTROY:
+            if (g_accountMenuWindow == window) {
+                g_accountMenuWindow = nullptr;
+            }
+            return 0;
+    }
+
+    return DefWindowProc(window, message, wParam, lParam);
+}
+
+RECT CalculateAccountMenuRect(int width, int height) {
+    HWND taskbar = FindCurrentProcessTaskbarWindow();
+    RECT taskbarRect{};
+    if (!taskbar || !GetWindowRect(taskbar, &taskbarRect)) {
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &taskbarRect, 0);
+        taskbarRect.top = taskbarRect.bottom - 48;
+    }
+
+    HMONITOR monitor = MonitorFromRect(&taskbarRect, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    GetMonitorInfo(monitor, &monitorInfo);
+
+    int x = taskbarRect.right - 540;
+    int y = taskbarRect.top - height - 8;
+    if (taskbarRect.top <= monitorInfo.rcMonitor.top + 4) {
+        y = taskbarRect.bottom + 8;
+    }
+
+    x = std::max<int>(monitorInfo.rcWork.left + 8,
+                      std::min<int>(x, monitorInfo.rcWork.right - width - 8));
+    y = std::max<int>(monitorInfo.rcWork.top + 8,
+                      std::min<int>(y, monitorInfo.rcWork.bottom - height - 8));
+
+    return RECT{x, y, x + width, y + height};
+}
+
+void ShowAccountMenu(wux::FrameworkElement const& root) {
+    try {
+        (void)root;
+
+        if (g_accountMenuWindow && IsWindow(g_accountMenuWindow)) {
+            DestroyWindow(g_accountMenuWindow);
+            return;
+        }
+
+        g_accountMenuAccounts = ReadCodexAccounts();
+        if (g_accountMenuAccounts.empty()) {
+            g_accountMenuAccounts.push_back(
+                {L"default", L"Default", L"", L"", true});
+        }
+        constexpr int width = 336;
+        int height = 10 + static_cast<int>(g_accountMenuAccounts.size()) * 56 +
+                     12 + 4 * 36 + 10;
+        RebuildAccountMenuHitItems(width);
+
+        constexpr PCWSTR className = L"TaskbarStatsAccountMenuPopup";
+        static bool classRegistered = false;
+        if (!classRegistered) {
+            WNDCLASS windowClass{};
+            windowClass.lpfnWndProc = AccountMenuWindowProc;
+            windowClass.hInstance = g_hookModule ? g_hookModule : GetModuleHandle(nullptr);
+            windowClass.lpszClassName = className;
+            windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            if (!RegisterClass(&windowClass) &&
+                GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                Wh_Log(L"RegisterClass failed for account menu popup: %u",
+                       GetLastError());
+                return;
+            }
+            classRegistered = true;
+        }
+
+        RECT popupRect = CalculateAccountMenuRect(width, height);
+        g_accountMenuWindow = CreateWindowEx(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            className, L"TaskbarStats Accounts", WS_POPUP,
+            popupRect.left, popupRect.top, width, height,
+            FindCurrentProcessTaskbarWindow(), nullptr,
+            g_hookModule ? g_hookModule : GetModuleHandle(nullptr), nullptr);
+        if (!g_accountMenuWindow) {
+            Wh_Log(L"CreateWindowEx failed for account menu popup: %u",
+                   GetLastError());
+            return;
+        }
+
+        SetWindowPos(g_accountMenuWindow, HWND_TOPMOST, popupRect.left,
+                     popupRect.top, width, height,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        InvalidateRect(g_accountMenuWindow, nullptr, TRUE);
+        Wh_Log(L"Account menu popup shown at %d,%d %dx%d",
+               popupRect.left, popupRect.top, width, height);
     } catch (winrt::hresult_error const& ex) {
         Wh_Log(L"ShowAccountMenu failed: 0x%08X %s", ex.code(),
                ex.message().c_str());
