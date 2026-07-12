@@ -60,6 +60,7 @@ $CompileArgs += @(
     "-loleaut32",
     "-lruntimeobject",
     "-lgdi32",
+    "-lgdiplus",
     "-static-libstdc++",
     "-static-libgcc",
     "-Wl,--export-all-symbols"
@@ -97,6 +98,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -Force $SettingsBuildOutput (Join-Path $PublishDir "TaskbarStatsSettings.exe")
+
+$AssetsSource = Join-Path $RepoRoot "assets"
+$AssetsOutput = Join-Path $PublishDir "Assets"
+if (Test-Path $AssetsSource) {
+    New-Item -ItemType Directory -Force $AssetsOutput | Out-Null
+    Copy-Item -Path (Join-Path $AssetsSource "*") -Destination $AssetsOutput -Recurse -Force
+}
 
 $ExePath = Join-Path $PublishDir "TaskbarStats.exe"
 $HashPath = Join-Path $PublishDir "TaskbarStats.exe.sha256"

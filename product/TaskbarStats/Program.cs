@@ -97,6 +97,9 @@ internal static class Program
         var agentTask = Task.Run(
             () => CodexStatusWorker.RunAsync(args, cancellation.Token),
             cancellation.Token);
+        var weatherTask = Task.Run(
+            () => WeatherWorker.RunAsync(cancellation.Token),
+            cancellation.Token);
         var watchdogTask = Task.Run(
             () => RunExplorerWatchdogAsync(hookPath, cancellation.Token),
             cancellation.Token);
@@ -114,7 +117,7 @@ internal static class Program
 
         try
         {
-            await Task.WhenAll(agentTask, watchdogTask, accountCommandsTask);
+            await Task.WhenAll(agentTask, weatherTask, watchdogTask, accountCommandsTask);
         }
         catch (OperationCanceledException)
         {

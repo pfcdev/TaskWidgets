@@ -25,6 +25,7 @@ Unsupported builds should fail closed and log diagnostics.
 
 #include <windows.h>
 #include <windowsx.h>
+#include <gdiplus.h>
 #include <ocidl.h>
 #include <xamlom.h>
 
@@ -43,6 +44,7 @@ Unsupported builds should fail closed and log diagnostics.
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
@@ -61,6 +63,7 @@ namespace wuxcp = winrt::Windows::UI::Xaml::Controls::Primitives;
 namespace wuxi = winrt::Windows::UI::Xaml::Input;
 namespace wuxm = winrt::Windows::UI::Xaml::Media;
 namespace wuxmi = winrt::Windows::UI::Xaml::Media::Imaging;
+namespace gdi = Gdiplus;
 
 std::atomic_bool g_tapInitialized = false;
 std::atomic_bool g_delayedInitializationScheduled = false;
@@ -70,6 +73,7 @@ bool g_inInjectTaskbarStatsTap = false;
 HWND g_win32ProofWindow = nullptr;
 HWND g_win32ProofParent = nullptr;
 HMODULE g_hookModule = nullptr;
+ULONG_PTR g_gdiplusToken = 0;
 
 HMODULE GetCurrentModuleHandle();
 
@@ -368,8 +372,11 @@ wuxm::SolidColorBrush MakeBrush(BYTE a, BYTE r, BYTE g, BYTE b) {
 }
 
 std::vector<std::wstring> GetAntigravityProjectTitles();
+std::wstring ReadActiveWidgetDesign();
+wux::UIElement MakePngImage(PCWSTR assetName, double width, double height);
 void SetExpandedMode(wux::UIElement const& root, bool expanded);
 void ShowAccountMenu(wux::FrameworkElement const& root);
+void ShowWeatherMenu(wux::FrameworkElement const& root);
 HWND FindCurrentProcessTaskbarWindow();
 void UpdateTaskbarStatsRoot(wux::UIElement const& root);
 void ShowWidgetLibraryWindow();
@@ -402,6 +409,7 @@ int g_accountMenuHoveredIndex = -1;
 HWND g_widgetLibraryWindow = nullptr;
 std::vector<WidgetLibraryHitItem> g_widgetLibraryHitItems;
 int g_widgetLibraryHoveredIndex = -1;
+HWND g_weatherMenuWindow = nullptr;
 
 wuxc::FontIcon MakeNamedStateIcon(PCWSTR name) {
     wuxc::FontIcon icon;
@@ -477,73 +485,75 @@ wux::FrameworkElement MakeExpandedProjectRow(PCWSTR rowName,
 }
 
 wux::FrameworkElement MakeWeatherPanel() {
-    wuxc::Grid weather;
+    wuxc::Border weather;
     weather.Name(L"TaskbarStatsWeatherPanel");
     weather.Height(36);
-    weather.Width(184);
+    weather.Width(228);
     weather.Visibility(wux::Visibility::Collapsed);
+    weather.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(8));
+    weather.Background(MakeBrush(0xF5, 0x11, 0x11, 0x11));
+    weather.BorderBrush(MakeBrush(0xFF, 0x2D, 0x2D, 0x2D));
+    weather.BorderThickness(wux::ThicknessHelper::FromUniformLength(1));
+    weather.Padding(wux::ThicknessHelper::FromLengths(12, 4, 8, 4));
 
+    wuxc::Grid layout;
+    layout.Width(206);
+    layout.Height(28);
+
+    wuxc::ColumnDefinition textColumn;
+    textColumn.Width(wux::GridLengthHelper::FromPixels(118));
+    wuxc::ColumnDefinition tempColumn;
+    tempColumn.Width(wux::GridLengthHelper::FromPixels(44));
     wuxc::ColumnDefinition iconColumn;
-    iconColumn.Width(wux::GridLengthHelper::FromPixels(34));
-    wuxc::ColumnDefinition mainColumn;
-    mainColumn.Width(wux::GridLengthHelper::FromPixels(84));
-    wuxc::ColumnDefinition metaColumn;
-    metaColumn.Width(wux::GridLengthHelper::FromPixels(66));
-    weather.ColumnDefinitions().Append(iconColumn);
-    weather.ColumnDefinitions().Append(mainColumn);
-    weather.ColumnDefinitions().Append(metaColumn);
+    iconColumn.Width(wux::GridLengthHelper::FromPixels(44));
+    layout.ColumnDefinitions().Append(textColumn);
+    layout.ColumnDefinitions().Append(tempColumn);
+    layout.ColumnDefinitions().Append(iconColumn);
 
-    wuxc::FontIcon icon;
-    icon.Glyph(L"\xE706");
-    icon.FontFamily(wuxm::FontFamily(L"Segoe MDL2 Assets"));
-    icon.FontSize(20);
-    icon.Width(30);
-    icon.Height(30);
-    icon.HorizontalAlignment(wux::HorizontalAlignment::Center);
-    icon.VerticalAlignment(wux::VerticalAlignment::Center);
-    icon.Foreground(MakeBrush(0xFF, 0xF8, 0xC5, 0x55));
-    wuxc::Grid::SetColumn(icon, 0);
+    wuxc::Grid textBlock;
+    textBlock.VerticalAlignment(wux::VerticalAlignment::Center);
+    wuxc::RowDefinition cityRow;
+    cityRow.Height(wux::GridLengthHelper::FromPixels(15));
+    wuxc::RowDefinition timeRow;
+    timeRow.Height(wux::GridLengthHelper::FromPixels(12));
+    textBlock.RowDefinitions().Append(cityRow);
+    textBlock.RowDefinitions().Append(timeRow);
 
-    wuxc::StackPanel main;
-    main.Orientation(wuxc::Orientation::Vertical);
-    main.HorizontalAlignment(wux::HorizontalAlignment::Left);
-    main.VerticalAlignment(wux::VerticalAlignment::Center);
-    auto city = MakeNamedText(L"TaskbarStatsWeatherCity", L"Istanbul", 10, 0xF4);
-    city.Width(78);
+    auto city = MakeNamedText(L"TaskbarStatsWeatherCity", L"Izmir", 11, 0xFF);
+    city.Width(116);
     city.HorizontalAlignment(wux::HorizontalAlignment::Left);
     city.TextAlignment(wux::TextAlignment::Left);
     city.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    city.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+
     auto condition =
-        MakeNamedText(L"TaskbarStatsWeatherCondition", L"Static weather", 8, 0xB8);
-    condition.Width(78);
+        MakeNamedText(L"TaskbarStatsWeatherCondition", L"--:-- • --/--", 9, 0xB8);
+    condition.Width(116);
     condition.HorizontalAlignment(wux::HorizontalAlignment::Left);
     condition.TextAlignment(wux::TextAlignment::Left);
     condition.TextTrimming(wux::TextTrimming::CharacterEllipsis);
-    condition.Margin(wux::ThicknessHelper::FromLengths(0, -1, 0, 0));
-    main.Children().Append(city.as<wux::UIElement>());
-    main.Children().Append(condition.as<wux::UIElement>());
-    wuxc::Grid::SetColumn(main, 1);
 
-    wuxc::StackPanel meta;
-    meta.Orientation(wuxc::Orientation::Vertical);
-    meta.HorizontalAlignment(wux::HorizontalAlignment::Right);
-    meta.VerticalAlignment(wux::VerticalAlignment::Center);
-    auto temp = MakeNamedText(L"TaskbarStatsWeatherTemp", L"24 C", 13, 0xFF);
-    temp.Width(58);
+    wuxc::Grid::SetRow(city, 0);
+    wuxc::Grid::SetRow(condition, 1);
+    textBlock.Children().Append(city.as<wux::UIElement>());
+    textBlock.Children().Append(condition.as<wux::UIElement>());
+    wuxc::Grid::SetColumn(textBlock, 0);
+
+    auto temp = MakeNamedText(L"TaskbarStatsWeatherTemp", L"--\x00B0", 21, 0xFF);
+    temp.Width(44);
+    temp.VerticalAlignment(wux::VerticalAlignment::Center);
     temp.HorizontalAlignment(wux::HorizontalAlignment::Right);
     temp.TextAlignment(wux::TextAlignment::Right);
-    auto detail = MakeNamedText(L"TaskbarStatsWeatherDetail", L"42% RH", 8, 0xB8);
-    detail.Width(58);
-    detail.HorizontalAlignment(wux::HorizontalAlignment::Right);
-    detail.TextAlignment(wux::TextAlignment::Right);
-    detail.Margin(wux::ThicknessHelper::FromLengths(0, -2, 0, 0));
-    meta.Children().Append(temp.as<wux::UIElement>());
-    meta.Children().Append(detail.as<wux::UIElement>());
-    wuxc::Grid::SetColumn(meta, 2);
+    wuxc::Grid::SetColumn(temp, 1);
 
-    weather.Children().Append(icon.as<wux::UIElement>());
-    weather.Children().Append(main.as<wux::UIElement>());
-    weather.Children().Append(meta.as<wux::UIElement>());
+    auto icon = MakePngImage(L"weather\\rain.png", 48, 34);
+    SetElementName(icon.as<wux::FrameworkElement>(), L"TaskbarStatsWeatherIcon");
+    wuxc::Grid::SetColumn(icon.as<wux::FrameworkElement>(), 2);
+
+    layout.Children().Append(textBlock.as<wux::UIElement>());
+    layout.Children().Append(temp.as<wux::UIElement>());
+    layout.Children().Append(icon);
+    weather.Child(layout);
     return weather;
 }
 
@@ -670,7 +680,11 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
         SetExpandedMode(root.as<wux::UIElement>(), false);
     });
     root.Tapped([root](auto const&, wuxi::TappedRoutedEventArgs const& args) {
-        ShowAccountMenu(root);
+        if (ReadActiveWidgetDesign() == L"weather-static") {
+            ShowWeatherMenu(root);
+        } else {
+            ShowAccountMenu(root);
+        }
         args.Handled(true);
     });
 
@@ -679,6 +693,10 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
 
 std::wstring GetCodexStatusPath() {
     return GetTaskbarStatsPath(L"codex-status.json");
+}
+
+std::wstring GetWeatherStatusPath() {
+    return GetTaskbarStatsPath(L"weather-status.json");
 }
 
 std::wstring GetWidgetSettingsPath() {
@@ -902,6 +920,36 @@ wuxc::FontIcon MakeMenuIcon(PCWSTR glyph,
     icon.Height(18);
     icon.Foreground(wuxm::SolidColorBrush(color));
     icon.VerticalAlignment(wux::VerticalAlignment::Center);
+    return icon;
+}
+
+wux::UIElement MakePngImage(PCWSTR assetName, double width, double height) {
+    std::wstring assetPath = GetAssetsFolder();
+    assetPath += assetName;
+
+    if (FileExists(assetPath)) {
+        wuxc::Image image;
+        image.Width(width);
+        image.Height(height);
+        image.Stretch(wuxm::Stretch::Uniform);
+        image.HorizontalAlignment(wux::HorizontalAlignment::Center);
+        image.VerticalAlignment(wux::VerticalAlignment::Center);
+
+        wuxmi::BitmapImage source;
+        source.UriSource(wf::Uri(ToFileUri(assetPath)));
+        image.Source(source);
+        return image;
+    }
+
+    wuxc::FontIcon icon;
+    icon.Glyph(L"\xE706");
+    icon.FontFamily(wuxm::FontFamily(L"Segoe MDL2 Assets"));
+    icon.FontSize(std::min(width, height) * 0.65);
+    icon.Width(width);
+    icon.Height(height);
+    icon.HorizontalAlignment(wux::HorizontalAlignment::Center);
+    icon.VerticalAlignment(wux::VerticalAlignment::Center);
+    icon.Foreground(MakeBrush(0xFF, 0xBA, 0xE6, 0xFD));
     return icon;
 }
 
@@ -1830,6 +1878,370 @@ CodexStatusSnapshot ReadCodexStatusSnapshot() {
     return snapshot;
 }
 
+struct WeatherDaySnapshot {
+    std::wstring label = L"--";
+    int weatherCode = 3;
+    double max = 0;
+    double min = 0;
+};
+
+struct WeatherSnapshot {
+    bool loaded{};
+    long long updatedAtUnix = 0;
+    std::wstring location = L"Izmir";
+    double temperature = 0;
+    double apparentTemperature = 0;
+    double humidity = 0;
+    int weatherCode = 3;
+    double windSpeed = 0;
+    std::vector<WeatherDaySnapshot> days;
+};
+
+std::wstring WeatherIconAsset(int code) {
+    if (code == 0) {
+        return L"weather\\sun.png";
+    }
+    if (code == 1 || code == 2) {
+        return L"weather\\partly.png";
+    }
+    if (code == 3) {
+        return L"weather\\cloud.png";
+    }
+    if (code == 45 || code == 48) {
+        return L"weather\\fog.png";
+    }
+    if ((code >= 51 && code <= 57) || (code >= 61 && code <= 65) ||
+        (code >= 80 && code <= 82)) {
+        return L"weather\\rain.png";
+    }
+    if (code >= 71 && code <= 77) {
+        return L"weather\\snow.png";
+    }
+    if (code >= 95) {
+        return L"weather\\thunder.png";
+    }
+
+    return L"weather\\cloud.png";
+}
+
+std::wstring WeatherDescription(int code) {
+    if (code == 0) {
+        return L"Sunny";
+    }
+    if (code == 1 || code == 2) {
+        return L"Partly cloudy";
+    }
+    if (code == 3) {
+        return L"Cloudy";
+    }
+    if (code == 45 || code == 48) {
+        return L"Fog";
+    }
+    if ((code >= 51 && code <= 57) || (code >= 61 && code <= 65) ||
+        (code >= 80 && code <= 82)) {
+        return L"Rain";
+    }
+    if (code >= 71 && code <= 77) {
+        return L"Snow";
+    }
+    if (code >= 95) {
+        return L"Thunderstorm";
+    }
+
+    return L"Weather";
+}
+
+std::wstring FormatTemperature(double value) {
+    WCHAR buffer[24]{};
+    swprintf_s(buffer, L"%.0f\x00B0", value);
+    return buffer;
+}
+
+std::wstring FormatWeatherDate(long long unixTime) {
+    FILETIME fileTime{};
+    ULONGLONG value =
+        (static_cast<ULONGLONG>(unixTime) * 10000000ULL) + 116444736000000000ULL;
+    fileTime.dwLowDateTime = static_cast<DWORD>(value);
+    fileTime.dwHighDateTime = static_cast<DWORD>(value >> 32);
+
+    SYSTEMTIME utc{};
+    SYSTEMTIME local{};
+    FileTimeToSystemTime(&fileTime, &utc);
+    SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local);
+
+    WCHAR buffer[32]{};
+    swprintf_s(buffer, L"%02u:%02u • %02u/%02u", local.wHour, local.wMinute,
+               local.wDay, local.wMonth);
+    return buffer;
+}
+
+WeatherSnapshot ReadWeatherSnapshot() {
+    WeatherSnapshot snapshot;
+    std::string json = ReadUtf8File(GetWeatherStatusPath());
+    if (json.empty()) {
+        return snapshot;
+    }
+
+    snapshot.loaded = true;
+    ExtractJsonInt64(json, "updatedAtUnix", snapshot.updatedAtUnix);
+    ExtractJsonString(json, "location", snapshot.location);
+    ExtractJsonDouble(json, "temperature", snapshot.temperature);
+    ExtractJsonDouble(json, "apparentTemperature",
+                      snapshot.apparentTemperature);
+    ExtractJsonDouble(json, "humidity", snapshot.humidity);
+    ExtractJsonDouble(json, "windSpeed", snapshot.windSpeed);
+
+    long long weatherCode = 0;
+    if (ExtractJsonInt64(json, "weatherCode", weatherCode)) {
+        snapshot.weatherCode = static_cast<int>(weatherCode);
+    }
+
+    size_t daysKey = json.find("\"days\"");
+    size_t arrayStart = daysKey == std::string::npos
+                            ? std::string::npos
+                            : json.find('[', daysKey);
+    size_t arrayEnd = arrayStart == std::string::npos
+                          ? std::string::npos
+                          : json.find(']', arrayStart);
+    if (arrayStart != std::string::npos && arrayEnd != std::string::npos) {
+        size_t cursor = arrayStart;
+        while (cursor < arrayEnd && snapshot.days.size() < 7) {
+            size_t objectStart = json.find('{', cursor);
+            if (objectStart == std::string::npos || objectStart >= arrayEnd) {
+                break;
+            }
+
+            size_t objectEnd = json.find('}', objectStart);
+            if (objectEnd == std::string::npos || objectEnd > arrayEnd) {
+                break;
+            }
+
+            std::string object = json.substr(objectStart, objectEnd - objectStart + 1);
+            WeatherDaySnapshot day;
+            ExtractJsonString(object, "label", day.label);
+            ExtractJsonDouble(object, "max", day.max);
+            ExtractJsonDouble(object, "min", day.min);
+            long long dayCode = 0;
+            if (ExtractJsonInt64(object, "weatherCode", dayCode)) {
+                day.weatherCode = static_cast<int>(dayCode);
+            }
+            snapshot.days.push_back(day);
+            cursor = objectEnd + 1;
+        }
+    }
+
+    return snapshot;
+}
+
+void DrawWeatherIcon(HDC dc,
+                     const std::wstring& assetName,
+                     int x,
+                     int y,
+                     int width,
+                     int height) {
+    if (!g_gdiplusToken) {
+        return;
+    }
+
+    std::wstring path = GetAssetsFolder() + assetName;
+    if (!FileExists(path)) {
+        return;
+    }
+
+    gdi::Graphics graphics(dc);
+    graphics.SetInterpolationMode(gdi::InterpolationModeHighQualityBicubic);
+    gdi::Image image(path.c_str());
+    if (image.GetLastStatus() == gdi::Ok) {
+        graphics.DrawImage(&image, x, y, width, height);
+    }
+}
+
+void DrawWeatherMenuPopup(HDC dc, RECT clientRect) {
+    HBRUSH background = CreateSolidBrush(RGB(17, 17, 17));
+    FillRect(dc, &clientRect, background);
+    DeleteObject(background);
+
+    SetBkMode(dc, TRANSPARENT);
+
+    HFONT dayFont = CreateFontW(
+        -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT tempFont = CreateFontW(
+        -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT detailFont = CreateFontW(
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    WeatherSnapshot weather = ReadWeatherSnapshot();
+    std::vector<WeatherDaySnapshot> days = weather.days;
+    if (days.empty()) {
+        days.push_back(WeatherDaySnapshot{
+            .label = L"Bugün",
+            .weatherCode = weather.weatherCode,
+            .max = weather.temperature,
+            .min = weather.apparentTemperature,
+        });
+    }
+
+    constexpr int paddingX = 30;
+    constexpr int rowHeight = 54;
+    int y = 30;
+    for (size_t i = 0; i < days.size() && i < 7; ++i) {
+        const auto& day = days[i];
+        RECT dayRect{paddingX, y, paddingX + 90, y + rowHeight};
+        RECT maxRect{clientRect.right - 108, y, clientRect.right - 64,
+                     y + rowHeight};
+        RECT minRect{clientRect.right - 56, y, clientRect.right - 18,
+                     y + rowHeight};
+
+        DrawPopupText(dc, day.label, dayRect, RGB(245, 245, 245), dayFont);
+        DrawWeatherIcon(dc, WeatherIconAsset(day.weatherCode), paddingX + 108,
+                        y + 3, 44, 44);
+        DrawPopupText(dc, FormatTemperature(day.max), maxRect,
+                      RGB(245, 245, 245), tempFont,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawPopupText(dc, FormatTemperature(day.min), minRect,
+                      RGB(168, 168, 176), tempFont,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        y += rowHeight;
+    }
+
+    if (!weather.loaded) {
+        RECT statusRect{paddingX, clientRect.bottom - 34, clientRect.right - paddingX,
+                        clientRect.bottom - 12};
+        DrawPopupText(dc, L"Weather data is loading...", statusRect,
+                      RGB(168, 168, 176), detailFont);
+    }
+
+    DeleteObject(dayFont);
+    DeleteObject(tempFont);
+    DeleteObject(detailFont);
+}
+
+LRESULT CALLBACK WeatherMenuWindowProc(HWND window,
+                                       UINT message,
+                                       WPARAM wParam,
+                                       LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(window, &ps);
+            RECT rect{};
+            GetClientRect(window, &rect);
+            DrawWeatherMenuPopup(dc, rect);
+            EndPaint(window, &ps);
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN: {
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            RECT client{};
+            GetClientRect(window, &client);
+            if (!PtInRect(&client, point)) {
+                DestroyWindow(window);
+            }
+            return 0;
+        }
+
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                DestroyWindow(window);
+            }
+            return 0;
+
+        case WM_KILLFOCUS:
+        case WM_CANCELMODE:
+            DestroyWindow(window);
+            return 0;
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_CAPTURECHANGED:
+            if (g_weatherMenuWindow == window &&
+                reinterpret_cast<HWND>(lParam) != window) {
+                DestroyWindow(window);
+            }
+            return 0;
+
+        case WM_DESTROY:
+            if (g_weatherMenuWindow == window) {
+                g_weatherMenuWindow = nullptr;
+            }
+            if (GetCapture() == window) {
+                ReleaseCapture();
+            }
+            return 0;
+    }
+
+    return DefWindowProc(window, message, wParam, lParam);
+}
+
+void ShowWeatherMenu(wux::FrameworkElement const& root) {
+    try {
+        (void)root;
+
+        if (g_weatherMenuWindow && IsWindow(g_weatherMenuWindow)) {
+            DestroyWindow(g_weatherMenuWindow);
+            return;
+        }
+
+        constexpr PCWSTR className = L"TaskbarStatsWeatherPopup";
+        static bool classRegistered = false;
+        if (!classRegistered) {
+            WNDCLASS windowClass{};
+            windowClass.lpfnWndProc = WeatherMenuWindowProc;
+            windowClass.hInstance = g_hookModule ? g_hookModule : GetModuleHandle(nullptr);
+            windowClass.lpszClassName = className;
+            windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            if (!RegisterClass(&windowClass) &&
+                GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                Wh_Log(L"RegisterClass failed for weather popup: %u",
+                       GetLastError());
+                return;
+            }
+            classRegistered = true;
+        }
+
+        constexpr int width = 336;
+        constexpr int height = 440;
+        RECT popupRect = CalculateAccountMenuRect(width, height);
+
+        g_weatherMenuWindow = CreateWindowEx(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            className, L"TaskbarStats Weather", WS_POPUP,
+            popupRect.left, popupRect.top, width, height,
+            FindCurrentProcessTaskbarWindow(), nullptr,
+            g_hookModule ? g_hookModule : GetModuleHandle(nullptr), nullptr);
+        if (!g_weatherMenuWindow) {
+            Wh_Log(L"CreateWindowEx failed for weather popup: %u",
+                   GetLastError());
+            return;
+        }
+
+        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 28, 28);
+        SetWindowRgn(g_weatherMenuWindow, region, TRUE);
+        SetWindowPos(g_weatherMenuWindow, HWND_TOPMOST, popupRect.left,
+                     popupRect.top, width, height,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetCapture(g_weatherMenuWindow);
+        InvalidateRect(g_weatherMenuWindow, nullptr, TRUE);
+        Wh_Log(L"Weather popup shown at %d,%d %dx%d",
+               popupRect.left, popupRect.top, width, height);
+    } catch (...) {
+        Wh_Log(L"ShowWeatherMenu failed with unknown exception");
+    }
+}
+
 long long CurrentUnixTime() {
     FILETIME fileTime{};
     GetSystemTimeAsFileTime(&fileTime);
@@ -2131,6 +2543,25 @@ void SetNamedTextColor(wux::UIElement const& root,
     }
 }
 
+void SetNamedImageSource(wux::UIElement const& root,
+                         PCWSTR name,
+                         const std::wstring& assetName) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto image = element ? element.try_as<wuxc::Image>() : nullptr;
+    if (!image) {
+        return;
+    }
+
+    std::wstring assetPath = GetAssetsFolder() + assetName;
+    if (!FileExists(assetPath)) {
+        return;
+    }
+
+    wuxmi::BitmapImage source;
+    source.UriSource(wf::Uri(ToFileUri(assetPath)));
+    image.Source(source);
+}
+
 void SetNamedVisibility(wux::UIElement const& root,
                         PCWSTR name,
                         wux::Visibility visibility) {
@@ -2262,6 +2693,10 @@ void UpdateExpandedTaskRows(wux::UIElement const& root,
 
 void SetExpandedMode(wux::UIElement const& root, bool expanded) {
     if (ReadActiveWidgetDesign() != L"codex-status") {
+        auto rootElement = root.try_as<wux::FrameworkElement>();
+        if (rootElement) {
+            rootElement.Width(240);
+        }
         SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
                            wux::Visibility::Collapsed);
         SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
@@ -2291,9 +2726,10 @@ void SetExpandedMode(wux::UIElement const& root, bool expanded) {
 void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
     std::wstring activeDesign = ReadActiveWidgetDesign();
     if (activeDesign == L"weather-static") {
+        WeatherSnapshot weather = ReadWeatherSnapshot();
         auto rootElement = root.try_as<wux::FrameworkElement>();
         if (rootElement) {
-            rootElement.Width(184);
+            rootElement.Width(240);
         }
 
         SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
@@ -2302,10 +2738,23 @@ void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
                            wux::Visibility::Collapsed);
         SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
                            wux::Visibility::Visible);
-        SetNamedText(root, L"TaskbarStatsWeatherCity", L"Istanbul");
-        SetNamedText(root, L"TaskbarStatsWeatherCondition", L"Static weather");
-        SetNamedText(root, L"TaskbarStatsWeatherTemp", L"24 C");
-        SetNamedText(root, L"TaskbarStatsWeatherDetail", L"42% RH");
+
+        if (!weather.loaded) {
+            SetNamedText(root, L"TaskbarStatsWeatherCity", L"Izmir");
+            SetNamedText(root, L"TaskbarStatsWeatherCondition", L"--:-- • --/--");
+            SetNamedText(root, L"TaskbarStatsWeatherTemp", L"--\x00B0");
+            SetNamedImageSource(root, L"TaskbarStatsWeatherIcon",
+                                L"weather\\rain.png");
+            return;
+        }
+
+        SetNamedText(root, L"TaskbarStatsWeatherCity", weather.location);
+        SetNamedText(root, L"TaskbarStatsWeatherCondition",
+                     FormatWeatherDate(weather.updatedAtUnix));
+        SetNamedText(root, L"TaskbarStatsWeatherTemp",
+                     FormatTemperature(weather.temperature));
+        SetNamedImageSource(root, L"TaskbarStatsWeatherIcon",
+                            WeatherIconAsset(weather.weatherCode));
         return;
     }
 
@@ -3359,6 +3808,15 @@ HMODULE WINAPI LoadLibraryExW_Hook(LPCWSTR fileName,
 BOOL Wh_ModInit() {
     Wh_Log(L"TaskbarStats product hook init");
     g_uninitializing = false;
+    if (!g_gdiplusToken) {
+        gdi::GdiplusStartupInput startupInput{};
+        gdi::Status status =
+            gdi::GdiplusStartup(&g_gdiplusToken, &startupInput, nullptr);
+        if (status != gdi::Ok) {
+            g_gdiplusToken = 0;
+            Wh_Log(L"GdiplusStartup failed: %d", static_cast<int>(status));
+        }
+    }
     return TRUE;
 }
 
@@ -3373,6 +3831,11 @@ void Wh_ModUninit() {
     }
 
     Wh_Log(L"TaskbarStats uninit");
+
+    if (g_weatherMenuWindow && IsWindow(g_weatherMenuWindow)) {
+        DestroyWindow(g_weatherMenuWindow);
+        g_weatherMenuWindow = nullptr;
+    }
 
     if (g_win32ProofWindow) {
         DestroyWindow(g_win32ProofWindow);
@@ -3397,6 +3860,11 @@ void Wh_ModUninit() {
     }
 
     g_tapInitialized = false;
+
+    if (g_gdiplusToken) {
+        gdi::GdiplusShutdown(g_gdiplusToken);
+        g_gdiplusToken = 0;
+    }
 }
 
 std::wstring GetShutdownEventName() {
