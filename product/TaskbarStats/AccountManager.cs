@@ -266,6 +266,7 @@ internal static class AccountManager
             return;
         }
 
+        Thread.Sleep(1500);
         StartAntigravity(idePath, activeAccount);
     }
 
@@ -424,24 +425,73 @@ internal static class AccountManager
     {
         Directory.CreateDirectory(RealCodexHome);
 
+        if (LaunchAntigravityFromShell(idePath, account, "primary") &&
+            WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
+        {
+            return;
+        }
+
+        Log($"Antigravity did not show a main window after primary launch for account {account.Id}; retrying");
+        Thread.Sleep(2500);
+        if (LaunchAntigravityFromShell(idePath, account, "retry") &&
+            WaitForAntigravityMainWindowToOpen(idePath, TimeSpan.FromSeconds(20)))
+        {
+            return;
+        }
+
+        Log($"Antigravity launch did not produce a visible main window for account {account.Id}");
+    }
+
+    private static bool LaunchAntigravityFromShell(string idePath,
+                                                   AccountSnapshot account,
+                                                   string attempt)
+    {
         var info = new ProcessStartInfo
         {
             FileName = idePath,
-            UseShellExecute = false,
-            WorkingDirectory = Path.GetDirectoryName(idePath) ?? AppDirectory
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(idePath) ?? AppDirectory,
+            WindowStyle = ProcessWindowStyle.Normal
         };
-        info.Environment["CODEX_HOME"] = RealCodexHome;
-        info.Environment["CODEX_SQLITE_HOME"] = RealCodexHome;
 
         try
         {
-            Process.Start(info);
-            Log($"Started Antigravity with Codex account {account.Id}: codexHome={RealCodexHome}");
+            var process = Process.Start(info);
+            Log($"Started Antigravity ({attempt}) with Codex account {account.Id}: pid={process?.Id.ToString() ?? "unknown"}; codexHome={RealCodexHome}");
+            return process != null;
         }
         catch (Exception ex)
         {
-            Log($"Failed to start Antigravity with account {account.Id}: {ex.Message}");
+            Log($"Failed to start Antigravity ({attempt}) with account {account.Id}: {ex.Message}");
+            return false;
         }
+    }
+
+    private static bool WaitForAntigravityMainWindowToOpen(string idePath,
+                                                           TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var mainWindows = GetAntigravityProcesses(idePath)
+                .Where(process => process.MainWindowHandle != IntPtr.Zero)
+                .ToArray();
+            if (mainWindows.Length > 0)
+            {
+                foreach (var process in mainWindows)
+                {
+                    Log($"Antigravity main window opened: pid={process.Id}");
+                }
+
+                DisposeProcesses(mainWindows);
+                return true;
+            }
+
+            DisposeProcesses(mainWindows);
+            Thread.Sleep(500);
+        }
+
+        return false;
     }
 
     private static bool MaterializeCodexAccount(AccountSnapshot targetAccount)
