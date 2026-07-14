@@ -164,10 +164,29 @@ jobs:
             "artifacts\TaskbarStatsSetup.exe.sha256"
           )
           $notes = "TaskbarStats $env:RELEASE_TAG build. Use TaskbarStatsSetup.exe for normal Windows installation/update."
+
+          function Invoke-GhWithRetry {
+            param([string[]]$Arguments)
+
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              gh @Arguments
+              if ($LASTEXITCODE -eq 0) {
+                return
+              }
+              if ($attempt -eq 4) {
+                exit $LASTEXITCODE
+              }
+              $delay = 5 * $attempt
+              Write-Warning "gh command failed with exit code $LASTEXITCODE. Retrying in $delay seconds..."
+              Start-Sleep -Seconds $delay
+            }
+          }
+
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
-            exit $LASTEXITCODE
+            $uploadArgs = @("release", "upload", $env:RELEASE_TAG) + $files + @("--repo", $env:GITHUB_REPOSITORY, "--clobber")
+            Invoke-GhWithRetry $uploadArgs
+            exit 0
           }
 
           $args = @(
@@ -188,4 +207,4 @@ jobs:
             $args += "--prerelease"
           }
 
-          gh @args
+          Invoke-GhWithRetry $args
