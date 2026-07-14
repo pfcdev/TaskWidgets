@@ -65,6 +65,12 @@ internal static class Program
             return 0;
         }
 
+        if (args.Any(arg => string.Equals(arg, "--download-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            await GitHubUpdater.DownloadUpdateIfAvailableAsync(CancellationToken.None);
+            return 0;
+        }
+
         if (args.Any(arg => string.Equals(arg, "--update-silent", StringComparison.OrdinalIgnoreCase)))
         {
             await GitHubUpdater.CheckAndInstallIfAvailableAsync(CancellationToken.None, silentSetup: true);

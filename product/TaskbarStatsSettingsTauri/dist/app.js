@@ -648,7 +648,9 @@ function bindRotation() {
 
 function updatesTemplate() {
   const update = state.updateStatus || {};
-  const busy = update.state === "checking" || update.state === "downloading" || update.state === "installing";
+  const busy = update.state === "checking" || update.state === "downloading";
+  const checking = update.state === "checking";
+  const installLabel = update.state === "ready" || update.state === "installing" ? "Open Installer" : "Install Update";
   return `
     <div class="grid">
       <section class="panel">
@@ -664,8 +666,8 @@ function updatesTemplate() {
       <section class="panel">
         <h3>Actions</h3>
         <div class="actions">
-          <button class="btn primary" id="check-updates" ${busy ? "disabled" : ""}>${busy ? "Checking..." : "Check Updates"}</button>
-          <button class="btn ${update.updateAvailable ? "success" : ""}" id="install-update" ${!update.updateAvailable || busy ? "disabled" : ""}>Install Update</button>
+          <button class="btn primary" id="check-updates" ${busy ? "disabled" : ""}>${checking ? "Checking..." : "Check Updates"}</button>
+          <button class="btn ${update.updateAvailable ? "success" : ""}" id="install-update" ${!update.updateAvailable || busy ? "disabled" : ""}>${installLabel}</button>
         </div>
         <p id="inline-status">${escapeHtml(state.status)}</p>
       </section>
@@ -726,10 +728,12 @@ function bindUpdates() {
       setStatus("Downloading update...");
       state.updateStatus = { ...state.updateStatus, state: "downloading", message: "Downloading update..." };
       render();
-      const loaded = await invoke("run_loader_command", { arg: "--update" });
+      const loaded = await invoke("run_loader_command", { arg: "--download-update" });
       state.updateStatus = loaded.updateStatus || {};
-      setStatus(state.updateStatus.message || "Update command finished");
+      setStatus("Opening installer...");
       render();
+      await invoke("launch_downloaded_installer");
+      setStatus("Installer opened");
     } catch (error) {
       setStatus(`Update install failed: ${error}`);
       await refreshState();

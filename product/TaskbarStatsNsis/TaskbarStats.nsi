@@ -93,10 +93,17 @@ FunctionEnd
 Function StopTaskbarStats
   IfFileExists "$INSTDIR\TaskbarStats.exe" 0 +2
     ExecWait '"$INSTDIR\TaskbarStats.exe" --detach'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F /T'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Get-Process -Name TaskbarStats,TaskbarStatsMediaHelper,TaskbarStatsSettings -ErrorAction SilentlyContinue | Stop-Process -Force"'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F /T'
   Sleep 1500
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F'
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F'
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F'
 FunctionEnd
 
 Section "TaskbarStats" SecMain
@@ -153,10 +160,16 @@ SectionEnd
 Function un.StopTaskbarStats
   IfFileExists "$INSTDIR\TaskbarStats.exe" 0 +2
     ExecWait '"$INSTDIR\TaskbarStats.exe" --detach'
-  Sleep 1500
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F'
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F'
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F /T'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Get-Process -Name TaskbarStats,TaskbarStatsMediaHelper,TaskbarStatsSettings -ErrorAction SilentlyContinue | Stop-Process -Force"'
+  Sleep 1000
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStats.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsMediaHelper.exe /F /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM TaskbarStatsSettings.exe /F /T'
   nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM explorer.exe /F'
   Sleep 1000
 FunctionEnd

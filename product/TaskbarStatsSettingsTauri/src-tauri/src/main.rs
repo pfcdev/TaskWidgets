@@ -79,6 +79,7 @@ struct UpdateStatus {
     latest_version: Option<String>,
     update_available: Option<bool>,
     message: Option<String>,
+    installer_path: Option<String>,
     updated_at_unix: Option<i64>,
 }
 
@@ -347,7 +348,7 @@ fn open_widget_libraries() -> Result<(), String> {
 
 #[tauri::command]
 fn run_loader_command(arg: String) -> Result<AppState, String> {
-    let allowed = ["--check-updates", "--update"];
+    let allowed = ["--check-updates", "--update", "--download-update"];
     if !allowed.iter().any(|item| *item == arg) {
         return Err("Unsupported loader command.".to_owned());
     }
@@ -366,6 +367,50 @@ fn run_loader_command(arg: String) -> Result<AppState, String> {
     load_state()
 }
 
+#[tauri::command]
+fn launch_downloaded_installer() -> Result<(), String> {
+    let dir = app_dir()?;
+    let status = read_update_status_from(&dir);
+    let installer = resolve_installer_path(&dir, &status)?;
+    let working_dir = installer
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir.clone());
+
+    Command::new(&installer)
+        .current_dir(working_dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Installer could not be launched: {e}"))
+}
+
+fn resolve_installer_path(app_dir: &Path, status: &UpdateStatus) -> Result<PathBuf, String> {
+    if let Some(path) = status.installer_path.as_deref() {
+        let installer = PathBuf::from(path);
+        if installer.exists() {
+            return Ok(installer);
+        }
+    }
+
+    let latest = status
+        .latest_version
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "No downloaded update version was found.".to_owned())?;
+    let installer = app_dir
+        .join("Updates")
+        .join(latest)
+        .join("TaskbarStatsSetup.exe");
+    if installer.exists() {
+        return Ok(installer);
+    }
+
+    Err(format!(
+        "Downloaded installer was not found: {}",
+        installer.display()
+    ))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -374,7 +419,8 @@ fn main() {
             load_state,
             save_settings,
             open_widget_libraries,
-            run_loader_command
+            run_loader_command,
+            launch_downloaded_installer
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TaskbarStats settings");

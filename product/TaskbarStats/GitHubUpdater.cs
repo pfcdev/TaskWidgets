@@ -58,6 +58,44 @@ internal static class GitHubUpdater
         }
     }
 
+    public static async Task DownloadUpdateIfAvailableAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            WriteStatus("checking", CurrentVersion().ToString(), "", false,
+                "Checking GitHub latest release...");
+            var release = await GetLatestReleaseAsync(cancellationToken);
+            if (release is null || !release.IsNewerThan(CurrentVersion()))
+            {
+                Log("No GitHub update available");
+                WriteStatus("current", CurrentVersion().ToString(), release?.TagName ?? "", false,
+                    "TaskbarStats is up to date.");
+                return;
+            }
+
+            Log($"GitHub update available for download: {release.TagName}");
+            WriteStatus("downloading", CurrentVersion().ToString(), release.TagName, true,
+                $"Downloading {release.TagName}...");
+            var downloaded = await DownloadReleaseAsync(release, cancellationToken);
+            WriteStatus(
+                "ready",
+                CurrentVersion().ToString(),
+                release.TagName,
+                true,
+                "Installer downloaded.",
+                downloaded.Path);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"Update download failed: {ex.Message}");
+            WriteStatus("error", CurrentVersion().ToString(), "", false, ex.Message);
+        }
+    }
+
     public static async Task CheckOnlyAsync(CancellationToken cancellationToken)
     {
         try
@@ -412,7 +450,8 @@ del "%~f0"
         string currentVersion,
         string latestVersion,
         bool updateAvailable,
-        string message)
+        string message,
+        string? installerPath = null)
     {
         try
         {
@@ -424,6 +463,7 @@ del "%~f0"
                 latestVersion,
                 updateAvailable,
                 message,
+                installerPath,
                 updatedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
             };
             var json = JsonSerializer.Serialize(
