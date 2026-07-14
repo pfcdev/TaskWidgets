@@ -122,6 +122,9 @@ let state = {
 
 let autosaveTimer = 0;
 let previewTimer = 0;
+let updatePollTimer = 0;
+let updateInstallerLaunchInProgress = false;
+let updateInstallRequested = false;
 
 function widgetById(id) {
   return widgetCatalog.find((item) => item.id === id) || widgetCatalog[0];
@@ -247,6 +250,7 @@ async function boot() {
   render();
   loadReleaseTimeline();
   startPreviewLoop();
+  if (isUpdateBusy(state.updateStatus)) startUpdatePolling();
 }
 
 function render() {
@@ -550,7 +554,9 @@ function currentWidgetSettingsFields() {
 
 function updatesPage() {
   const update = state.updateStatus || {};
-  const busy = update.state === "checking" || update.state === "downloading";
+  const busy = isUpdateBusy(update);
+  const downloading = update.state === "downloading";
+  const installing = update.state === "installing" || updateInstallerLaunchInProgress;
   const current = update.currentVersion || "0.1.0";
   const latest = update.latestVersion || "Not checked";
   const checked = update.updatedAtUnix ? formatUnixTime(update.updatedAtUnix) : "Not checked";
@@ -585,14 +591,15 @@ function updatesPage() {
         <div class="update-actions">
           <button class="gradient-action" id="check-updates" ${busy ? "disabled" : ""} type="button">
             <span class="material-symbols-outlined">${busy ? "hourglass_top" : "sync"}</span>
-            <span>${busy ? "Checking" : "Check Updates"}</span>
+            <span>${downloading ? "Downloading" : busy ? "Checking" : "Check Updates"}</span>
           </button>
-          <button class="secondary-action" id="install-update" ${!update.updateAvailable || busy ? "disabled" : ""} type="button">
-            <span class="material-symbols-outlined">download</span>
-            <span>${update.state === "ready" || update.state === "installing" ? "Open Installer" : "Download & Install"}</span>
+          <button class="secondary-action" id="install-update" ${!update.updateAvailable || busy || installing ? "disabled" : ""} type="button">
+            <span class="material-symbols-outlined">${installing ? "hourglass_top" : "system_update_alt"}</span>
+            <span>${installing ? "Starting Setup" : downloading ? "Downloading" : "Install Update"}</span>
           </button>
         </div>
         <p class="${busy ? "pulse" : ""}">${escapeHtml(update.message || "Run a check to refresh update status.")}</p>
+        ${updateProgressMarkup(update)}
       </section>
 
       <section class="glass-panel release-timeline">
@@ -603,6 +610,25 @@ function updatesPage() {
       </section>
     </div>
     ${inlineStatus()}
+  `;
+}
+
+function updateProgressMarkup(update) {
+  if (update.state !== "downloading" && update.progressPercent == null) return "";
+  const percent = Number.isFinite(Number(update.progressPercent))
+    ? Math.min(100, Math.max(0, Number(update.progressPercent)))
+    : 0;
+  const sizeText = update.downloadedBytes || update.totalBytes
+    ? `${formatBytes(update.downloadedBytes || 0)}${update.totalBytes ? ` / ${formatBytes(update.totalBytes)}` : ""}`
+    : "Preparing download...";
+  return `
+    <div class="download-progress" aria-label="Update download progress">
+      <div class="download-progress-head">
+        <span>${escapeHtml(sizeText)}</span>
+        <strong>${Number.isFinite(percent) ? `${percent.toFixed(percent % 1 ? 1 : 0)}%` : ""}</strong>
+      </div>
+      <div class="download-progress-track"><i style="width:${escapeAttr(percent)}%"></i></div>
+    </div>
   `;
 }
 
@@ -1134,15 +1160,24 @@ function bindUpdatesPage() {
   });
   document.getElementById("install-update")?.addEventListener("click", async () => {
     try {
-      setStatus("Downloading update...");
-      state.updateStatus = { ...state.updateStatus, state: "downloading", message: "Downloading update..." };
+      setStatus("Installing update...");
+      updateInstallRequested = true;
+      if (state.updateStatus?.state === "ready" || state.updateStatus?.installerPath) {
+        autoLaunchDownloadedInstaller();
+        return;
+      }
+
+      state.updateStatus = {
+        ...state.updateStatus,
+        state: "downloading",
+        message: "Downloading update...",
+        progressPercent: 0,
+        downloadedBytes: 0,
+      };
       render();
-      const loaded = await invoke("run_loader_command", { arg: "--download-update" });
-      state.updateStatus = loaded.updateStatus || {};
-      setStatus("Opening installer...");
-      render();
-      await invoke("launch_downloaded_installer");
-      setStatus("Installer opened");
+      const loaded = await invoke("start_loader_command", { arg: "--download-update" });
+      state.updateStatus = loaded.updateStatus || state.updateStatus;
+      startUpdatePolling();
     } catch (error) {
       setStatus(`Update install failed: ${error}`);
       await refreshState();
@@ -1225,10 +1260,57 @@ async function refreshState() {
     const loaded = await invoke("load_state");
     state.updateStatus = loaded.updateStatus || {};
     state.mediaStatus = loaded.mediaStatus || {};
+    if (updateInstallRequested && (state.updateStatus?.state === "ready" || state.updateStatus?.installerPath)) {
+      autoLaunchDownloadedInstaller();
+    }
     render();
+    if (!isUpdateBusy(state.updateStatus)) stopUpdatePolling();
   } catch {
     render();
   }
+}
+
+async function autoLaunchDownloadedInstaller() {
+  if (updateInstallerLaunchInProgress) return;
+  updateInstallerLaunchInProgress = true;
+  stopUpdatePolling();
+  const readyStatus = state.updateStatus || {};
+  state.updateStatus = {
+    ...readyStatus,
+    state: "installing",
+    message: "Installer downloaded. Starting setup...",
+  };
+  setStatus("Starting setup...");
+  render();
+  try {
+    await invoke("launch_downloaded_installer");
+    setStatus("Setup started");
+  } catch (error) {
+    updateInstallerLaunchInProgress = false;
+    state.updateStatus = {
+      ...readyStatus,
+      state: "ready",
+      message: `Setup could not be started: ${error}`,
+    };
+    setStatus(`Setup start failed: ${error}`);
+    render();
+  }
+}
+
+function isUpdateBusy(update) {
+  return update?.state === "checking" || update?.state === "downloading";
+}
+
+function startUpdatePolling() {
+  clearInterval(updatePollTimer);
+  updatePollTimer = setInterval(() => {
+    refreshState();
+  }, 900);
+}
+
+function stopUpdatePolling() {
+  clearInterval(updatePollTimer);
+  updatePollTimer = 0;
 }
 
 async function loadReleaseTimeline(force = false) {
@@ -1297,6 +1379,18 @@ function formatUnixTime(value) {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds <= 0) return "Not checked";
   return new Date(seconds * 1000).toLocaleString();
+}
+
+function formatBytes(value) {
+  let bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes < 0) bytes = 0;
+  const units = ["B", "KB", "MB", "GB"];
+  let index = 0;
+  while (bytes >= 1024 && index < units.length - 1) {
+    bytes /= 1024;
+    index += 1;
+  }
+  return `${bytes.toFixed(bytes >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
 function formatDate(value) {

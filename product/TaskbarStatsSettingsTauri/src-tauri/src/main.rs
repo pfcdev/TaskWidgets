@@ -80,6 +80,9 @@ struct UpdateStatus {
     update_available: Option<bool>,
     message: Option<String>,
     installer_path: Option<String>,
+    progress_percent: Option<f64>,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
     updated_at_unix: Option<i64>,
 }
 
@@ -362,7 +365,7 @@ fn open_widget_libraries() -> Result<(), String> {
 
 #[tauri::command]
 fn run_loader_command(arg: String) -> Result<AppState, String> {
-    let allowed = ["--check-updates", "--update", "--download-update"];
+    let allowed = ["--check-updates", "--update"];
     if !allowed.iter().any(|item| *item == arg) {
         return Err("Unsupported loader command.".to_owned());
     }
@@ -377,6 +380,24 @@ fn run_loader_command(arg: String) -> Result<AppState, String> {
     if !status.success() {
         return Err(format!("Loader command exited with {status}"));
     }
+
+    load_state()
+}
+
+#[tauri::command]
+fn start_loader_command(arg: String) -> Result<AppState, String> {
+    let allowed = ["--download-update"];
+    if !allowed.iter().any(|item| *item == arg) {
+        return Err("Unsupported loader command.".to_owned());
+    }
+
+    let dir = app_dir()?;
+    Command::new(dir.join("TaskbarStats.exe"))
+        .current_dir(&dir)
+        .arg(arg)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())?;
 
     load_state()
 }
@@ -423,9 +444,30 @@ fn launch_downloaded_installer() -> Result<(), String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| dir.clone());
+    let script_path = working_dir.join("launch-installer-detached.cmd");
+    let log_path = dir.join("Logs").join("loader.log");
+    let script = format!(
+        "@echo off\r\n\
+setlocal\r\n\
+set \"SRC={}\"\r\n\
+set \"DIR={}\"\r\n\
+set \"LOG={}\"\r\n\
+if not exist \"%DIR%\\Logs\" mkdir \"%DIR%\\Logs\" >nul 2>nul\r\n\
+>>\"%LOG%\" echo %DATE% %TIME% [settings-updater] Launching detached setup: \"%SRC%\"\r\n\
+start \"\" \"%SRC%\"\r\n\
+exit /b 0\r\n",
+        installer.display(),
+        dir.display(),
+        log_path.display()
+    );
+    fs::write(&script_path, script)
+        .map_err(|e| format!("Installer launch helper could not be written: {e}"))?;
 
-    Command::new(&installer)
+    Command::new("cmd.exe")
         .current_dir(working_dir)
+        .arg("/d")
+        .arg("/c")
+        .arg(&script_path)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("Installer could not be launched: {e}"))
@@ -467,6 +509,7 @@ fn main() {
             save_settings,
             open_widget_libraries,
             run_loader_command,
+            start_loader_command,
             control_runtime,
             launch_downloaded_installer
         ])

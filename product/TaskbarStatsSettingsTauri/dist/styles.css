@@ -1389,6 +1389,44 @@ button {
   gap: 10px;
 }
 
+.download-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: -6px;
+}
+
+.download-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--on-variant);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.download-progress-head strong {
+  color: var(--on-surface);
+}
+
+.download-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .08);
+}
+
+.download-progress-track i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5fd4ff, #34d399);
+  box-shadow: 0 0 18px rgba(95, 212, 255, .35);
+  transition: width .24s ease;
+}
+
 .release-timeline {
   grid-row: span 2;
 }

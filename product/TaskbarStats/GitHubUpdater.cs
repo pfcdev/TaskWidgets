@@ -42,7 +42,10 @@ internal static class GitHubUpdater
             Log($"GitHub update available: {release.TagName}");
             WriteStatus("downloading", CurrentVersion().ToString(), release.TagName, true,
                 $"Downloading {release.TagName}...");
-            var downloaded = await DownloadReleaseAsync(release, cancellationToken);
+            var downloaded = await DownloadReleaseAsync(
+                release,
+                cancellationToken,
+                (downloadedBytes, totalBytes) => WriteDownloadStatus(release, downloadedBytes, totalBytes));
             WriteStatus("installing", CurrentVersion().ToString(), release.TagName, true,
                 silentSetup ? "Applying update..." : "Launching installer...");
             StartUpdateScriptAndExit(downloaded, silentSetup);
@@ -76,13 +79,16 @@ internal static class GitHubUpdater
             Log($"GitHub update available for download: {release.TagName}");
             WriteStatus("downloading", CurrentVersion().ToString(), release.TagName, true,
                 $"Downloading {release.TagName}...");
-            var downloaded = await DownloadReleaseAsync(release, cancellationToken);
+            var downloaded = await DownloadReleaseAsync(
+                release,
+                cancellationToken,
+                (downloadedBytes, totalBytes) => WriteDownloadStatus(release, downloadedBytes, totalBytes));
             WriteStatus(
                 "ready",
                 CurrentVersion().ToString(),
                 release.TagName,
                 true,
-                "Installer downloaded.",
+                "Installer downloaded. Starting setup...",
                 downloaded.Path);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -264,7 +270,8 @@ internal static class GitHubUpdater
 
     private static async Task<DownloadedUpdate> DownloadReleaseAsync(
         ReleaseInfo release,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<long, long?>? progress = null)
     {
         Directory.CreateDirectory(UpdatesDirectory);
         var directory = Path.Combine(UpdatesDirectory, release.TagName);
@@ -272,13 +279,49 @@ internal static class GitHubUpdater
         var filePath = Path.Combine(directory, release.AssetName);
 
         using var client = CreateHttpClient();
-        var bytes = await client.GetByteArrayAsync(release.DownloadUrl, cancellationToken);
-        if (bytes.Length < 1024 * 1024)
+        using var response = await client.GetAsync(
+            release.DownloadUrl,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength;
+        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
+        await using (var output = File.Create(filePath))
+        {
+            var buffer = new byte[128 * 1024];
+            long downloadedBytes = 0;
+            var lastProgress = DateTimeOffset.MinValue;
+            progress?.Invoke(downloadedBytes, totalBytes);
+
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                downloadedBytes += read;
+
+                var now = DateTimeOffset.UtcNow;
+                if (now - lastProgress >= TimeSpan.FromMilliseconds(400) ||
+                    (totalBytes.HasValue && downloadedBytes >= totalBytes.Value))
+                {
+                    lastProgress = now;
+                    progress?.Invoke(downloadedBytes, totalBytes);
+                }
+            }
+
+            progress?.Invoke(downloadedBytes, totalBytes);
+        }
+
+        var fileInfo = new FileInfo(filePath);
+        if (!fileInfo.Exists || fileInfo.Length < 1024 * 1024)
         {
             throw new InvalidOperationException("Downloaded update is unexpectedly small");
         }
-
-        await File.WriteAllBytesAsync(filePath, bytes, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(release.Sha256Url))
         {
@@ -287,7 +330,8 @@ internal static class GitHubUpdater
                 .FirstOrDefault();
             if (!string.IsNullOrWhiteSpace(expected))
             {
-                var actual = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                var downloadedBytes = await File.ReadAllBytesAsync(filePath, cancellationToken);
+                var actual = Convert.ToHexString(SHA256.HashData(downloadedBytes)).ToLowerInvariant();
                 if (!string.Equals(expected.Trim().ToLowerInvariant(), actual, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException("Downloaded update SHA256 verification failed");
@@ -383,7 +427,7 @@ del "%~f0"
     private static HttpClient CreateHttpClient(HttpMessageHandler? handler = null)
     {
         var client = handler is null ? new HttpClient() : new HttpClient(handler);
-        client.Timeout = TimeSpan.FromSeconds(12);
+        client.Timeout = TimeSpan.FromMinutes(10);
         client.DefaultRequestHeaders.UserAgent.ParseAdd("TaskbarStats/0.1");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
         return client;
@@ -451,7 +495,10 @@ del "%~f0"
         string latestVersion,
         bool updateAvailable,
         string message,
-        string? installerPath = null)
+        string? installerPath = null,
+        double? progressPercent = null,
+        long? downloadedBytes = null,
+        long? totalBytes = null)
     {
         try
         {
@@ -464,6 +511,9 @@ del "%~f0"
                 updateAvailable,
                 message,
                 installerPath,
+                progressPercent,
+                downloadedBytes,
+                totalBytes,
                 updatedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
             };
             var json = JsonSerializer.Serialize(
@@ -475,6 +525,43 @@ del "%~f0"
         {
             // Status writes are best-effort and must not break updates.
         }
+    }
+
+    private static void WriteDownloadStatus(
+        ReleaseInfo release,
+        long downloadedBytes,
+        long? totalBytes)
+    {
+        double? progressPercent = totalBytes is > 0
+            ? Math.Round(downloadedBytes * 100d / totalBytes.Value, 1)
+            : null;
+        var message = progressPercent.HasValue
+            ? $"Downloading {release.TagName}... {progressPercent.Value:0.#}%"
+            : $"Downloading {release.TagName}... {FormatBytes(downloadedBytes)}";
+
+        WriteStatus(
+            "downloading",
+            CurrentVersion().ToString(),
+            release.TagName,
+            true,
+            message,
+            progressPercent: progressPercent,
+            downloadedBytes: downloadedBytes,
+            totalBytes: totalBytes);
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB"];
+        double value = bytes;
+        var index = 0;
+        while (value >= 1024 && index < units.Length - 1)
+        {
+            value /= 1024;
+            index++;
+        }
+
+        return $"{value:0.#} {units[index]}";
     }
 
     private enum UpdatePackageKind
