@@ -382,6 +382,39 @@ fn run_loader_command(arg: String) -> Result<AppState, String> {
 }
 
 #[tauri::command]
+fn control_runtime(action: String) -> Result<AppState, String> {
+    let dir = app_dir()?;
+    let exe = dir.join("TaskbarStats.exe");
+    if !exe.exists() {
+        return Err(format!("TaskbarStats.exe was not found: {}", exe.display()));
+    }
+
+    match action.as_str() {
+        "load" => {
+            Command::new(&exe)
+                .current_dir(&dir)
+                .arg("--no-update-check")
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("Runtime could not be started: {e}"))?;
+        }
+        "unload" => {
+            let status = Command::new(&exe)
+                .current_dir(&dir)
+                .arg("--detach")
+                .status()
+                .map_err(|e| format!("Runtime unload could not be started: {e}"))?;
+            if !status.success() {
+                return Err(format!("Runtime unload exited with {status}"));
+            }
+        }
+        _ => return Err("Unsupported runtime action.".to_owned()),
+    }
+
+    load_state()
+}
+
+#[tauri::command]
 fn launch_downloaded_installer() -> Result<(), String> {
     let dir = app_dir()?;
     let status = read_update_status_from(&dir);
@@ -434,6 +467,7 @@ fn main() {
             save_settings,
             open_widget_libraries,
             run_loader_command,
+            control_runtime,
             launch_downloaded_installer
         ])
         .run(tauri::generate_context!())

@@ -402,6 +402,8 @@ long long CurrentUnixTime();
 long long CurrentUnixMillis();
 bool ExtractJsonInt64(const std::string& json, const char* key, long long& value);
 void SetExpandedMode(wux::UIElement const& root, bool expanded);
+void ShowCodexHoverPopup();
+void HideCodexHoverPopup();
 void ShowAccountMenu(wux::FrameworkElement const& root);
 void ShowWeatherMenu(wux::FrameworkElement const& root);
 HWND FindCurrentProcessTaskbarWindow();
@@ -442,6 +444,8 @@ struct WidgetInstanceRuntime {
 };
 
 HWND g_accountMenuWindow = nullptr;
+HWND g_codexHoverWindow = nullptr;
+std::vector<std::wstring> g_codexHoverTitles;
 std::vector<CodexAccountInfo> g_accountMenuAccounts;
 std::vector<AccountMenuHitItem> g_accountMenuHitItems;
 int g_accountMenuHoveredIndex = -1;
@@ -500,10 +504,10 @@ wux::FrameworkElement MakeExpandedProjectRow(PCWSTR rowName,
     row.Orientation(wuxc::Orientation::Horizontal);
     row.HorizontalAlignment(wux::HorizontalAlignment::Center);
     row.VerticalAlignment(wux::VerticalAlignment::Center);
-    row.Height(12);
+    row.Height(14);
 
     auto title = MakeNamedText(titleName, L"", 9, 0xF0);
-    title.Width(126);
+    title.Width(166);
     title.HorizontalAlignment(wux::HorizontalAlignment::Left);
     title.TextAlignment(wux::TextAlignment::Left);
     title.TextTrimming(wux::TextTrimming::CharacterEllipsis);
@@ -512,7 +516,7 @@ wux::FrameworkElement MakeExpandedProjectRow(PCWSTR rowName,
     auto icon = MakeNamedStateIcon(iconName);
 
     auto stateText = MakeNamedText(stateName, L"", 8, 0xCC);
-    stateText.Width(30);
+    stateText.Width(32);
     stateText.HorizontalAlignment(wux::HorizontalAlignment::Left);
     stateText.TextAlignment(wux::TextAlignment::Left);
     stateText.VerticalAlignment(wux::VerticalAlignment::Center);
@@ -1186,13 +1190,13 @@ wux::FrameworkElement MakeTaskbarStatsWidgetRoot(const WidgetInstanceRuntime& in
 
     wuxc::Grid expanded;
     expanded.Name(L"TaskbarStatsExpandedPanel");
-    expanded.Height(36);
-    expanded.Width(184);
+    expanded.Height(44);
+    expanded.Width(230);
     expanded.Visibility(wux::Visibility::Collapsed);
 
     for (int i = 0; i < 3; ++i) {
         wuxc::RowDefinition row;
-        row.Height(wux::GridLengthHelper::FromPixels(12));
+        row.Height(wux::GridLengthHelper::FromPixels(14));
         expanded.RowDefinitions().Append(row);
     }
 
@@ -1232,10 +1236,15 @@ wux::FrameworkElement MakeTaskbarStatsWidgetRoot(const WidgetInstanceRuntime& in
     root.Children().Append(layoutMarker.as<wux::UIElement>());
 
     root.PointerEntered([root](auto const&, auto const&) {
-        SetExpandedMode(root.as<wux::UIElement>(), true);
+        auto element = root.as<wux::UIElement>();
+        if (GetWidgetDesignFromRoot(element) == L"codex-status") {
+            SetExpandedMode(element, false);
+            ShowCodexHoverPopup();
+        }
     });
     root.PointerExited([root](auto const&, auto const&) {
         SetExpandedMode(root.as<wux::UIElement>(), false);
+        HideCodexHoverPopup();
     });
     root.Tapped([root](auto const&, wuxi::TappedRoutedEventArgs const& args) {
         std::wstring activeDesign = GetWidgetDesignFromRoot(root.as<wux::UIElement>());
@@ -2017,6 +2026,173 @@ void DrawPopupText(HDC dc,
     HGDIOBJ oldFont = SelectObject(dc, font);
     DrawTextW(dc, text.c_str(), -1, &rect, format);
     SelectObject(dc, oldFont);
+}
+
+void DrawCodexHoverPopup(HDC dc, RECT clientRect) {
+    HBRUSH background = CreateSolidBrush(RGB(24, 29, 38));
+    FillRect(dc, &clientRect, background);
+    DeleteObject(background);
+
+    SetBkMode(dc, TRANSPARENT);
+
+    HFONT titleFont = CreateFontW(
+        -12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT detailFont = CreateFontW(
+        -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT iconFont = CreateFontW(
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+
+    RECT titleRect{14, 8, clientRect.right - 14, 28};
+    DrawPopupText(dc, L"Active Antigravity Windows", titleRect,
+                  RGB(248, 250, 252), titleFont);
+
+    int y = 34;
+    for (size_t i = 0; i < g_codexHoverTitles.size() && i < 5; ++i) {
+        RECT row{10, y, clientRect.right - 10, y + 34};
+        HBRUSH rowBrush = CreateSolidBrush(i == 0 ? RGB(34, 42, 54)
+                                                  : RGB(29, 35, 45));
+        FillRect(dc, &row, rowBrush);
+        DeleteObject(rowBrush);
+
+        RECT iconRect{row.left + 8, row.top, row.left + 28, row.bottom};
+        RECT nameRect{row.left + 34, row.top + 3, row.right - 10, row.top + 19};
+        RECT detailRect{row.left + 34, row.top + 18, row.right - 10, row.bottom - 2};
+        DrawPopupText(dc, L"\xE950", iconRect, RGB(95, 212, 255), iconFont,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawPopupText(dc, g_codexHoverTitles[i], nameRect,
+                      RGB(241, 245, 249), titleFont);
+        DrawPopupText(dc, i == 0 ? L"Primary hover target" : L"Secondary window",
+                      detailRect, RGB(148, 163, 184), detailFont);
+        y += 38;
+    }
+
+    DeleteObject(titleFont);
+    DeleteObject(detailFont);
+    DeleteObject(iconFont);
+}
+
+LRESULT CALLBACK CodexHoverWindowProc(HWND window,
+                                      UINT message,
+                                      WPARAM wParam,
+                                      LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(window, &ps);
+            RECT rect{};
+            GetClientRect(window, &rect);
+            DrawCodexHoverPopup(dc, rect);
+            EndPaint(window, &ps);
+            return 0;
+        }
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+
+        case WM_DESTROY:
+            if (g_codexHoverWindow == window) {
+                g_codexHoverWindow = nullptr;
+            }
+            return 0;
+    }
+
+    return DefWindowProc(window, message, wParam, lParam);
+}
+
+RECT CalculateCodexHoverRect(int width, int height) {
+    HWND taskbar = FindCurrentProcessTaskbarWindow();
+    RECT taskbarRect{};
+    if (!taskbar || !GetWindowRect(taskbar, &taskbarRect)) {
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &taskbarRect, 0);
+        taskbarRect.top = taskbarRect.bottom - 48;
+    }
+
+    HMONITOR monitor = MonitorFromRect(&taskbarRect, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    GetMonitorInfo(monitor, &monitorInfo);
+
+    int x = taskbarRect.right - 540;
+    int y = taskbarRect.top - height - 10;
+    if (taskbarRect.top <= monitorInfo.rcMonitor.top + 4) {
+        y = taskbarRect.bottom + 10;
+    }
+
+    x = std::max<int>(monitorInfo.rcWork.left + 8,
+                      std::min<int>(x, monitorInfo.rcWork.right - width - 8));
+    y = std::max<int>(monitorInfo.rcWork.top + 8,
+                      std::min<int>(y, monitorInfo.rcWork.bottom - height - 8));
+    return RECT{x, y, x + width, y + height};
+}
+
+void HideCodexHoverPopup() {
+    if (g_codexHoverWindow && IsWindow(g_codexHoverWindow)) {
+        DestroyWindow(g_codexHoverWindow);
+    }
+    g_codexHoverWindow = nullptr;
+}
+
+void ShowCodexHoverPopup() {
+    try {
+        g_codexHoverTitles = GetAntigravityProjectTitles();
+        if (g_codexHoverTitles.size() <= 1) {
+            HideCodexHoverPopup();
+            return;
+        }
+
+        if (g_codexHoverWindow && IsWindow(g_codexHoverWindow)) {
+            DestroyWindow(g_codexHoverWindow);
+        }
+
+        constexpr PCWSTR className = L"TaskbarStatsCodexHoverPopup";
+        static bool classRegistered = false;
+        if (!classRegistered) {
+            WNDCLASS windowClass{};
+            windowClass.lpfnWndProc = CodexHoverWindowProc;
+            windowClass.hInstance = g_hookModule ? g_hookModule : GetModuleHandle(nullptr);
+            windowClass.lpszClassName = className;
+            windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            if (!RegisterClass(&windowClass) &&
+                GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                Wh_Log(L"RegisterClass failed for codex hover popup: %u",
+                       GetLastError());
+                return;
+            }
+            classRegistered = true;
+        }
+
+        int width = 292;
+        int rows = static_cast<int>(std::min<size_t>(g_codexHoverTitles.size(), 5));
+        int height = 42 + rows * 38 + 8;
+        RECT popupRect = CalculateCodexHoverRect(width, height);
+        g_codexHoverWindow = CreateWindowEx(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            className, L"TaskbarStats Codex Hover", WS_POPUP,
+            popupRect.left, popupRect.top, width, height,
+            FindCurrentProcessTaskbarWindow(), nullptr,
+            g_hookModule ? g_hookModule : GetModuleHandle(nullptr), nullptr);
+        if (!g_codexHoverWindow) {
+            Wh_Log(L"CreateWindowEx failed for codex hover popup: %u",
+                   GetLastError());
+            return;
+        }
+
+        SetWindowPos(g_codexHoverWindow, HWND_TOPMOST, popupRect.left,
+                     popupRect.top, width, height,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        InvalidateRect(g_codexHoverWindow, nullptr, TRUE);
+    } catch (...) {
+        Wh_Log(L"ShowCodexHoverPopup failed");
+    }
 }
 
 void DrawAccountMenuPopup(HDC dc, RECT clientRect) {
@@ -4156,6 +4332,11 @@ void SetNamedVisibility(wux::UIElement const& root,
     }
 }
 
+bool IsNamedVisible(wux::UIElement const& root, PCWSTR name) {
+    auto element = FindNamedFrameworkElement(root, name);
+    return element && element.Visibility() == wux::Visibility::Visible;
+}
+
 void SetRateLimitProgressVisual(wux::UIElement const& root,
                                 double usedPercent) {
     constexpr double barWidth = 126.0;
@@ -4335,8 +4516,8 @@ void SetExpandedMode(wux::UIElement const& root, bool expanded) {
 
     auto rootElement = root.try_as<wux::FrameworkElement>();
     if (rootElement) {
-        rootElement.Width(184);
-        rootElement.Height(36);
+        rootElement.Width(expanded ? 230 : 184);
+        rootElement.Height(expanded ? 44 : 36);
     }
 
     SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
@@ -4585,11 +4766,13 @@ void UpdateTaskbarStatsWidgetRoot(wux::UIElement const& root,
                        wux::Visibility::Collapsed);
     SetNamedVisibility(root, L"TaskbarStatsSteamPanel",
                        wux::Visibility::Collapsed);
-    SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
-                       wux::Visibility::Visible);
 
     CodexStatusSnapshot snapshot = ReadCodexStatusSnapshot();
     if (!snapshot.loaded) {
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Visible);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
         SetNamedText(root, L"TaskbarStatsTitle", L"Antigravity");
         SetRateLimitProgressVisual(root, -1);
         SetTaskStateVisual(root, L"IDLE", L"IDLE");
@@ -4602,6 +4785,15 @@ void UpdateTaskbarStatsWidgetRoot(wux::UIElement const& root,
     }
 
     std::vector<std::wstring> antigravityTitles = GetAntigravityProjectTitles();
+    if (auto codexRoot = root.try_as<wux::FrameworkElement>()) {
+        codexRoot.Width(184);
+        codexRoot.Height(36);
+    }
+    SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                       wux::Visibility::Visible);
+    SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                       wux::Visibility::Collapsed);
+
     if (!antigravityTitles.empty()) {
         uint32_t titleIndex = 0;
         if (antigravityTitles.size() > 1) {

@@ -480,18 +480,9 @@ function sequenceItem(id, index) {
 }
 
 function settingsPage() {
-  const active = activeWidget();
   return `
     ${pageHeader("settings")}
     <div class="settings-stack">
-      <section class="glass-panel settings-section">
-        <div class="section-title"><span class="material-symbols-outlined">palette</span><h3>Widget Appearance</h3></div>
-        ${settingToggle("enabled", "Active Widget Enabled", active.enabled, "widget")}
-        ${rangeSetting("positionPct", "Taskbar Position", "0% is taskbar left, 100% is before the system tray", active.positionPct ?? 100, 0, 100, "%", "widget")}
-        ${rangeSetting("moveX", "Move X", "Fine tune horizontal offset in pixels.", active.moveX ?? 0, -640, 640, "px", "widget")}
-        ${numberSetting("refreshIntervalSecs", "Refresh Interval", "Update frequency in seconds.", state.settings.refreshIntervalSecs, 1, 3600)}
-      </section>
-
       <section class="glass-panel settings-section">
         <div class="section-title"><span class="material-symbols-outlined">tune</span><h3>Current Widget Settings</h3></div>
         <div class="segmented wide">
@@ -500,6 +491,11 @@ function settingsPage() {
           `).join("")}
         </div>
         ${currentWidgetSettingsFields()}
+      </section>
+
+      <section class="glass-panel settings-section">
+        <div class="section-title"><span class="material-symbols-outlined">extension</span><h3>Explorer Integration</h3></div>
+        ${runtimeControlPanel()}
       </section>
 
       <section class="glass-panel settings-section danger-section">
@@ -843,6 +839,28 @@ function widgetSettingsModal(id) {
   `;
 }
 
+function runtimeControlPanel() {
+  return `
+    <section class="runtime-control-card">
+      <div>
+        <strong>Explorer Integration</strong>
+        <p>Load injects TaskbarStats widgets into explorer.exe. Unload removes every TaskbarStats hook from explorer.exe and stops the loader.</p>
+      </div>
+      <div class="runtime-actions">
+        <button class="secondary-action" data-runtime-action="unload" type="button">
+          <span class="material-symbols-outlined">eject</span>
+          <span>Unload</span>
+        </button>
+        <button class="gradient-action" data-runtime-action="load" type="button">
+          <span class="material-symbols-outlined">play_arrow</span>
+          <span>Load</span>
+        </button>
+      </div>
+      <p id="runtime-control-status"></p>
+    </section>
+  `;
+}
+
 function widgetRuntime(id) {
   if (id === "weather-static") {
     return {
@@ -1022,6 +1040,7 @@ function bindWidgetModal() {
   document.querySelectorAll("[data-close-modal]").forEach((button) => {
     button.onclick = () => closeWidgetModal();
   });
+  bindRuntimeControls();
   document.querySelector("[data-open-full-settings]")?.addEventListener("click", (event) => {
     state.settings.activeDesign = event.currentTarget.dataset.openFullSettings;
     state.modalWidgetId = "";
@@ -1035,9 +1054,36 @@ function bindWidgetModal() {
   });
 }
 
+async function runRuntimeAction(action) {
+  const status = document.getElementById("runtime-control-status");
+  const buttons = document.querySelectorAll("[data-runtime-action]");
+  const label = action === "unload" ? "Unloading from explorer.exe..." : "Loading into explorer.exe...";
+  buttons.forEach((button) => { button.disabled = true; });
+  if (status) status.textContent = label;
+  try {
+    const loaded = await invoke("control_runtime", { action });
+    state.settings = mergeSettings(loaded.settings || state.settings);
+    state.updateStatus = loaded.updateStatus || state.updateStatus;
+    state.mediaStatus = loaded.mediaStatus || state.mediaStatus;
+    setStatus(action === "unload" ? "Explorer hooks unloaded" : "Explorer hooks loaded");
+    if (status) status.textContent = action === "unload"
+      ? "Unloaded from explorer.exe"
+      : "Loaded into explorer.exe";
+  } catch (error) {
+    const message = action === "unload"
+      ? `Unload failed: ${error}`
+      : `Load failed: ${error}`;
+    setStatus(message);
+    if (status) status.textContent = message;
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
 function bindSettingsPage() {
   bindInputs();
   bindWidgetButtons();
+  bindRuntimeControls();
   document.getElementById("save-settings")?.addEventListener("click", () => saveSettings());
   document.getElementById("open-packs")?.addEventListener("click", async () => {
     try {
@@ -1059,6 +1105,14 @@ function bindSettingsPage() {
     } catch (error) {
       setStatus(`Reset failed: ${error}`);
     }
+  });
+}
+
+function bindRuntimeControls() {
+  document.querySelectorAll("[data-runtime-action]").forEach((button) => {
+    button.onclick = async () => {
+      await runRuntimeAction(button.dataset.runtimeAction);
+    };
   });
 }
 

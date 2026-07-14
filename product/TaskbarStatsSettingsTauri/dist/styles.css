@@ -1607,6 +1607,41 @@ button {
   padding: 4px 20px 8px;
 }
 
+.runtime-control-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, .08));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 8%, rgba(12, 14, 19, .62));
+}
+
+.runtime-control-card strong,
+.runtime-control-card p {
+  margin: 0;
+}
+
+.runtime-control-card p {
+  color: var(--on-variant);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.runtime-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#runtime-control-status {
+  min-height: 18px;
+}
+
 .modal-actions {
   border-top: 1px solid rgba(255, 255, 255, .08);
   border-bottom: 0;
