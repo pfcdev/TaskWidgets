@@ -29,6 +29,7 @@ internal static class AccountManager
     private static readonly string SettingsPath = Path.Combine(AppDirectory, "settings.json");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");
     private static readonly string SettingsAppPath = Path.Combine(AppDirectory, "TaskbarStatsSettings.exe");
+    private static readonly string LoaderPath = Path.Combine(AppDirectory, "TaskbarStats.exe");
     private static readonly string RealCodexHome = Path.Combine(UserProfile, ".codex");
     private static readonly string MaterializedAccountPath =
         Path.Combine(AppDirectory, "active-codex-account.txt");
@@ -152,7 +153,7 @@ internal static class AccountManager
                 Log($"Account command watcher error: {ex.Message}");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
         }
     }
 
@@ -174,6 +175,11 @@ internal static class AccountManager
             {
                 DeleteActiveAccount();
             }
+            else if (string.Equals(command, "deleteAccount", StringComparison.OrdinalIgnoreCase))
+            {
+                var accountId = node?["accountId"]?.GetValue<string>();
+                DeleteActiveAccount(accountId);
+            }
             else if (string.Equals(command, "switchAccount", StringComparison.OrdinalIgnoreCase))
             {
                 var accountId = node?["accountId"]?.GetValue<string>();
@@ -193,6 +199,14 @@ internal static class AccountManager
             else if (string.Equals(command, "openSettings", StringComparison.OrdinalIgnoreCase))
             {
                 OpenSettingsApp();
+            }
+            else if (string.Equals(command, "mediaToggle", StringComparison.OrdinalIgnoreCase))
+            {
+                MediaWorker.RequestToggle();
+            }
+            else if (string.Equals(command, "quit", StringComparison.OrdinalIgnoreCase))
+            {
+                QuitTaskbarStats();
             }
             else
             {
@@ -278,6 +292,12 @@ internal static class AccountManager
             return;
         }
 
+        if (IsSettingsAppAlreadyRunning())
+        {
+            Log($"Settings app is already running: {SettingsAppPath}");
+            return;
+        }
+
         Process.Start(new ProcessStartInfo
         {
             FileName = SettingsAppPath,
@@ -287,7 +307,56 @@ internal static class AccountManager
         Log($"Opened settings app: {SettingsAppPath}");
     }
 
-    private static void DeleteActiveAccount()
+    private static bool IsSettingsAppAlreadyRunning()
+    {
+        string expectedPath = Path.GetFullPath(SettingsAppPath);
+        foreach (Process process in Process.GetProcessesByName("TaskbarStatsSettings"))
+        {
+            using (process)
+            {
+                try
+                {
+                    string? path = process.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(path) &&
+                        string.Equals(Path.GetFullPath(path), expectedPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // Some processes can deny module path access. Ignore them.
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static void QuitTaskbarStats()
+    {
+        var exe = File.Exists(LoaderPath)
+            ? LoaderPath
+            : Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+        if (string.IsNullOrWhiteSpace(exe))
+        {
+            Log("Quit command ignored: loader path could not be resolved");
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = exe,
+            WorkingDirectory = AppDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList = { "--detach" }
+        });
+        Log("Quit command requested loader detach");
+    }
+
+    private static void DeleteActiveAccount(string? requestedAccountId = null)
     {
         AccountSettings.Account? accountToDelete = null;
         AccountSettings.Account? fallbackAccount = null;
@@ -295,8 +364,11 @@ internal static class AccountManager
         lock (SyncRoot)
         {
             var settings = ReadSettingsUnlocked();
+            var targetAccountId = string.IsNullOrWhiteSpace(requestedAccountId)
+                ? settings.ActiveAccountId
+                : requestedAccountId;
             accountToDelete = settings.Accounts.FirstOrDefault(item =>
-                string.Equals(item.Id, settings.ActiveAccountId,
+                string.Equals(item.Id, targetAccountId,
                     StringComparison.OrdinalIgnoreCase));
 
             if (accountToDelete is null)
@@ -322,6 +394,12 @@ internal static class AccountManager
             if (settings.Accounts.Count == 0)
             {
                 settings.Accounts.Add(fallbackAccount);
+            }
+            else if (settings.Accounts.All(item =>
+                         !string.Equals(item.Id, fallbackAccount.Id,
+                             StringComparison.OrdinalIgnoreCase)))
+            {
+                settings.Accounts.Insert(0, fallbackAccount);
             }
 
             settings.ActiveAccountId = fallbackAccount.Id;

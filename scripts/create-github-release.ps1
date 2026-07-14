@@ -104,18 +104,34 @@ function Publish-WithGitHubRest {
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BuildScript = Join-Path $RepoRoot "scripts\build-product.ps1"
+$InstallerBuildScript = Join-Path $RepoRoot "scripts\build-installer.ps1"
 $ArtifactDir = Join-Path $RepoRoot "artifacts\TaskbarStats"
 $Exe = Join-Path $ArtifactDir "TaskbarStats.exe"
 $Sha = Join-Path $ArtifactDir "TaskbarStats.exe.sha256"
+$InstallerExe = Join-Path $RepoRoot "artifacts\TaskbarStatsSetup.exe"
+$InstallerSha = Join-Path $RepoRoot "artifacts\TaskbarStatsSetup.exe.sha256"
 
-powershell -ExecutionPolicy Bypass -File $BuildScript -Configuration Release
+$ReleaseVersion = $Tag.TrimStart("v", "V")
+if ($ReleaseVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+    throw "Tag must be a numeric version like v0.1.0 or v0.1.0.1."
+}
+
+powershell -ExecutionPolicy Bypass -File $BuildScript -Configuration Release -Version $ReleaseVersion
+powershell -ExecutionPolicy Bypass -File $InstallerBuildScript -Configuration Release -Version $ReleaseVersion -SkipProductBuild
 
 if (-not (Test-Path $Exe)) {
     throw "Expected artifact not found: $Exe"
 }
+if (-not (Test-Path $InstallerExe)) {
+    throw "Expected installer artifact not found: $InstallerExe"
+}
 
 $Hash = (Get-FileHash $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -Path $Sha -Value "$Hash  TaskbarStats.exe" -Encoding ASCII
+$InstallerHash = (Get-FileHash $InstallerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -Path $InstallerSha -Value "$InstallerHash  TaskbarStatsSetup.exe" -Encoding ASCII
+
+$ReleaseFiles = @($Exe, $Sha, $InstallerExe, $InstallerSha)
 
 if (Get-Command gh -ErrorAction SilentlyContinue) {
     $ReleaseExists = $false
@@ -127,14 +143,14 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
     }
 
     if ($ReleaseExists) {
-        gh release upload $Tag $Exe $Sha --repo $Repo --clobber
+        gh release upload $Tag @ReleaseFiles --repo $Repo --clobber
     } else {
         $Args = @(
             "release", "create", $Tag,
-            $Exe, $Sha,
+            $Exe, $Sha, $InstallerExe, $InstallerSha,
             "--repo", $Repo,
             "--title", "TaskbarStats $Tag",
-            "--notes", "TaskbarStats product build."
+            "--notes", "TaskbarStats product build. Use TaskbarStatsSetup.exe for normal installation."
         )
         if ($Draft) {
             $Args += "--draft"
@@ -147,7 +163,7 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
     }
 } else {
     Write-Warning "GitHub CLI was not found. Falling back to GitHub REST API with git credential manager."
-    Publish-WithGitHubRest -Repo $Repo -Tag $Tag -Files @($Exe, $Sha) -Draft:$Draft -Prerelease:$Prerelease
+    Publish-WithGitHubRest -Repo $Repo -Tag $Tag -Files $ReleaseFiles -Draft:$Draft -Prerelease:$Prerelease
 }
 
 Write-Host "Release asset uploaded: $Repo $Tag"

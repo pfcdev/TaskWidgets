@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace TaskbarStatsProduct;
@@ -9,12 +10,15 @@ internal static class GitHubUpdater
 {
     private const string Owner = "pfcdev";
     private const string Repo = "TaskWidgets";
-    private const string AssetName = "TaskbarStats.exe";
-    private const string ShaAssetName = "TaskbarStats.exe.sha256";
+    private const string ExeAssetName = "TaskbarStats.exe";
+    private const string ExeShaAssetName = "TaskbarStats.exe.sha256";
+    private const string SetupAssetName = "TaskbarStatsSetup.exe";
+    private const string SetupShaAssetName = "TaskbarStatsSetup.exe.sha256";
     private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string UpdatesDirectory = Path.Combine(AppDirectory, "Updates");
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");
+    private static readonly string UpdateStatusPath = Path.Combine(AppDirectory, "update-status.json");
 
     public static async Task CheckAndInstallIfAvailableAsync(CancellationToken cancellationToken)
     {
@@ -24,11 +28,17 @@ internal static class GitHubUpdater
             if (release is null || !release.IsNewerThan(CurrentVersion()))
             {
                 Log("No GitHub update available");
+                WriteStatus("current", CurrentVersion().ToString(), release?.TagName ?? "", false,
+                    "TaskbarStats is up to date.");
                 return;
             }
 
             Log($"GitHub update available: {release.TagName}");
+            WriteStatus("downloading", CurrentVersion().ToString(), release.TagName, true,
+                $"Downloading {release.TagName}...");
             var downloaded = await DownloadReleaseAsync(release, cancellationToken);
+            WriteStatus("installing", CurrentVersion().ToString(), release.TagName, true,
+                "Applying update...");
             StartUpdateScriptAndExit(downloaded);
         }
         catch (OperationCanceledException)
@@ -38,6 +48,7 @@ internal static class GitHubUpdater
         catch (Exception ex)
         {
             Log($"Update check failed: {ex.Message}");
+            WriteStatus("error", CurrentVersion().ToString(), "", false, ex.Message);
         }
     }
 
@@ -49,18 +60,43 @@ internal static class GitHubUpdater
             if (release is null)
             {
                 Log("No GitHub release found");
+                WriteStatus("no-release", CurrentVersion().ToString(), "", false,
+                    "No GitHub release was found.");
                 return;
             }
 
             var current = CurrentVersion();
+            var available = release.IsNewerThan(current);
             Log(release.IsNewerThan(current)
                 ? $"Update available: current={current}, latest={release.TagName}"
                 : $"Already current: current={current}, latest={release.TagName}");
+            WriteStatus(
+                available ? "available" : "current",
+                current.ToString(),
+                release.TagName,
+                available,
+                available
+                    ? $"Update available: {release.TagName}"
+                    : "TaskbarStats is up to date.");
         }
         catch (Exception ex)
         {
             Log($"Update check failed: {ex.Message}");
+            WriteStatus("error", CurrentVersion().ToString(), "", false, ex.Message);
         }
+    }
+
+    public static async Task CheckOnlyIfDueAsync(
+        TimeSpan minimumInterval,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCheckDue(minimumInterval))
+        {
+            Log("Skipping GitHub update check; cached status is still fresh");
+            return;
+        }
+
+        await CheckOnlyAsync(cancellationToken);
     }
 
     private static async Task<ReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken)
@@ -83,7 +119,9 @@ internal static class GitHubUpdater
         }
 
         string? exeUrl = null;
-        string? shaUrl = null;
+        string? exeShaUrl = null;
+        string? setupUrl = null;
+        string? setupShaUrl = null;
         foreach (var asset in json["assets"]?.AsArray() ?? [])
         {
             var name = asset?["name"]?.GetValue<string>();
@@ -93,29 +131,42 @@ internal static class GitHubUpdater
                 continue;
             }
 
-            if (string.Equals(name, AssetName, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(name, SetupAssetName, StringComparison.OrdinalIgnoreCase))
+            {
+                setupUrl = downloadUrl;
+            }
+            else if (string.Equals(name, SetupShaAssetName, StringComparison.OrdinalIgnoreCase))
+            {
+                setupShaUrl = downloadUrl;
+            }
+            else if (string.Equals(name, ExeAssetName, StringComparison.OrdinalIgnoreCase))
             {
                 exeUrl = downloadUrl;
             }
-            else if (string.Equals(name, ShaAssetName, StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(name, ExeShaAssetName, StringComparison.OrdinalIgnoreCase))
             {
-                shaUrl = downloadUrl;
+                exeShaUrl = downloadUrl;
             }
+        }
+
+        if (!string.IsNullOrWhiteSpace(setupUrl))
+        {
+            return new ReleaseInfo(tag, SetupAssetName, setupUrl, setupShaUrl, IsInstaller: true);
         }
 
         return string.IsNullOrWhiteSpace(exeUrl)
             ? null
-            : new ReleaseInfo(tag, exeUrl, shaUrl);
+            : new ReleaseInfo(tag, ExeAssetName, exeUrl, exeShaUrl, IsInstaller: false);
     }
 
-    private static async Task<string> DownloadReleaseAsync(
+    private static async Task<DownloadedUpdate> DownloadReleaseAsync(
         ReleaseInfo release,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(UpdatesDirectory);
         var directory = Path.Combine(UpdatesDirectory, release.TagName);
         Directory.CreateDirectory(directory);
-        var exePath = Path.Combine(directory, AssetName);
+        var filePath = Path.Combine(directory, release.AssetName);
 
         using var client = CreateHttpClient();
         var bytes = await client.GetByteArrayAsync(release.DownloadUrl, cancellationToken);
@@ -124,7 +175,7 @@ internal static class GitHubUpdater
             throw new InvalidOperationException("Downloaded update is unexpectedly small");
         }
 
-        await File.WriteAllBytesAsync(exePath, bytes, cancellationToken);
+        await File.WriteAllBytesAsync(filePath, bytes, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(release.Sha256Url))
         {
@@ -141,21 +192,37 @@ internal static class GitHubUpdater
             }
         }
 
-        Log($"Downloaded update {release.TagName} to {exePath}");
-        return exePath;
+        Log($"Downloaded update {release.TagName} to {filePath}");
+        return new DownloadedUpdate(filePath, release.IsInstaller);
     }
 
-    private static void StartUpdateScriptAndExit(string downloadedExe)
+    private static void StartUpdateScriptAndExit(DownloadedUpdate update)
     {
         var currentExe = Environment.ProcessPath ??
                          Process.GetCurrentProcess().MainModule?.FileName ??
                          throw new InvalidOperationException("Current executable path could not be resolved");
-        var scriptPath = Path.Combine(Path.GetDirectoryName(downloadedExe)!, "apply-update.cmd");
+        var scriptPath = Path.Combine(Path.GetDirectoryName(update.Path)!, "apply-update.cmd");
         var currentPid = Environment.ProcessId;
-        var script = $"""
+        var script = update.IsInstaller
+            ? $"""
 @echo off
 setlocal
-set "SRC={downloadedExe}"
+set "SRC={update.Path}"
+set "DIR={AppDirectory}"
+set "PID={currentPid}"
+:wait
+tasklist /FI "PID eq %PID%" | find "%PID%" >nul
+if not errorlevel 1 (
+  timeout /t 1 /nobreak >nul
+  goto wait
+)
+start /wait "" "%SRC%" /quiet "/dir=%DIR%"
+del "%~f0"
+"""
+            : $"""
+@echo off
+setlocal
+set "SRC={update.Path}"
 set "DST={currentExe}"
 set "PID={currentPid}"
 :wait
@@ -190,6 +257,32 @@ del "%~f0"
         return client;
     }
 
+    private static bool IsCheckDue(TimeSpan minimumInterval)
+    {
+        try
+        {
+            if (!File.Exists(UpdateStatusPath))
+            {
+                return true;
+            }
+
+            using var document = JsonDocument.Parse(File.ReadAllText(UpdateStatusPath));
+            if (!document.RootElement.TryGetProperty("updatedAtUnix", out var updatedAt) ||
+                !updatedAt.TryGetInt64(out var updatedAtUnix) ||
+                updatedAtUnix <= 0)
+            {
+                return true;
+            }
+
+            var age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - updatedAtUnix;
+            return age < 0 || age >= minimumInterval.TotalSeconds;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     private static Version CurrentVersion() =>
         Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0, 0);
 
@@ -208,7 +301,44 @@ del "%~f0"
         }
     }
 
-    private sealed record ReleaseInfo(string TagName, string DownloadUrl, string? Sha256Url)
+    private static void WriteStatus(
+        string state,
+        string currentVersion,
+        string latestVersion,
+        bool updateAvailable,
+        string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppDirectory);
+            var payload = new
+            {
+                state,
+                currentVersion,
+                latestVersion,
+                updateAvailable,
+                message,
+                updatedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            };
+            var json = JsonSerializer.Serialize(
+                payload,
+                new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(UpdateStatusPath, json + Environment.NewLine);
+        }
+        catch
+        {
+            // Status writes are best-effort and must not break updates.
+        }
+    }
+
+    private sealed record DownloadedUpdate(string Path, bool IsInstaller);
+
+    private sealed record ReleaseInfo(
+        string TagName,
+        string AssetName,
+        string DownloadUrl,
+        string? Sha256Url,
+        bool IsInstaller)
     {
         public bool IsNewerThan(Version current)
         {

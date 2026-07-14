@@ -1,21 +1,34 @@
 param(
     [ValidateSet("Release", "Debug")]
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$Version = "0.1.0"
 )
 
 $ErrorActionPreference = "Stop"
 
+if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+    throw "Version must be numeric SemVer-like text such as 0.1.0 or 0.1.0.1."
+}
+
+$AssemblyVersion = if ($Version.Split('.').Count -eq 3) { "$Version.0" } else { $Version }
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $HookSource = Join-Path $RepoRoot "product\TaskbarStatsHook\taskbar_stats_hook.cpp"
+$MediaHelperSource = Join-Path $RepoRoot "product\TaskbarStatsMediaHelper\media_helper.cpp"
 $LoaderProject = Join-Path $RepoRoot "product\TaskbarStats\TaskbarStats.csproj"
-$SettingsProject = Join-Path $RepoRoot "product\TaskbarStatsSettings"
+$SettingsProject = Join-Path $RepoRoot "product\TaskbarStatsSettingsTauri\src-tauri"
+$SettingsTargetDir = Join-Path $env:TEMP "taskbarstats-tauri-target"
 $ResourceDir = Join-Path $RepoRoot "product\TaskbarStats\Resources"
 $HookOutput = Join-Path $ResourceDir "TaskbarStatsHook.dll"
+$MediaHelperOutput = Join-Path $ResourceDir "TaskbarStatsMediaHelper.exe"
 $SettingsResourceOutput = Join-Path $ResourceDir "TaskbarStatsSettings.exe"
 $PublishDir = Join-Path $RepoRoot "artifacts\TaskbarStats"
 
 New-Item -ItemType Directory -Force $ResourceDir | Out-Null
 New-Item -ItemType Directory -Force $PublishDir | Out-Null
+
+Get-Process TaskbarStatsMediaHelper -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 
 $Compiler = $env:TASKBARSTATS_CLANGXX
 if (-not $Compiler) {
@@ -52,33 +65,52 @@ if (-not $Compiler) {
     throw "No clang++ compiler found. Install LLVM clang++ or set TASKBARSTATS_CLANGXX."
 }
 
-$CompileArgs += @(
-    $HookSource,
-    "-shared",
-    "-o", $HookOutput,
+$NativeLinkArgs = @(
     "-lole32",
     "-loleaut32",
     "-lruntimeobject",
     "-lgdi32",
     "-lgdiplus",
     "-static-libstdc++",
-    "-static-libgcc",
+    "-static-libgcc"
+)
+
+$HookArgs = @($CompileArgs) + @(
+    $HookSource,
+    "-shared",
+    "-o", $HookOutput,
+    $NativeLinkArgs,
     "-Wl,--export-all-symbols"
 )
 
 Write-Host "Building native hook..."
-& $Compiler @CompileArgs
+& $Compiler @HookArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Native hook build failed with exit code $LASTEXITCODE."
 }
 
+if (Test-Path $MediaHelperSource) {
+    $MediaHelperArgs = @($CompileArgs) + @(
+        $MediaHelperSource,
+        "-municode",
+        "-o", $MediaHelperOutput,
+        $NativeLinkArgs
+    )
+
+    Write-Host "Building media helper..."
+    & $Compiler @MediaHelperArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Media helper build failed with exit code $LASTEXITCODE."
+    }
+}
+
 Write-Host "Building settings app..."
-cargo build --manifest-path (Join-Path $SettingsProject "Cargo.toml") --release -j 1
+cargo build --manifest-path (Join-Path $SettingsProject "Cargo.toml") --release -j 1 --target-dir $SettingsTargetDir
 if ($LASTEXITCODE -ne 0) {
     throw "Settings app build failed with exit code $LASTEXITCODE."
 }
 
-$SettingsBuildOutput = Join-Path $SettingsProject "target\release\TaskbarStatsSettings.exe"
+$SettingsBuildOutput = Join-Path $SettingsTargetDir "release\TaskbarStatsSettings.exe"
 if (-not (Test-Path $SettingsBuildOutput)) {
     throw "Settings app output was not found: $SettingsBuildOutput"
 }
@@ -89,6 +121,9 @@ dotnet publish $LoaderProject `
     -c $Configuration `
     -r win-x64 `
     --self-contained true `
+    -p:Version=$Version `
+    -p:AssemblyVersion=$AssemblyVersion `
+    -p:FileVersion=$AssemblyVersion `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:EnableCompressionInSingleFile=true `
@@ -98,6 +133,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -Force $SettingsBuildOutput (Join-Path $PublishDir "TaskbarStatsSettings.exe")
+if (Test-Path $MediaHelperOutput) {
+    Get-Process TaskbarStatsMediaHelper -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Copy-Item -Force $MediaHelperOutput (Join-Path $PublishDir "TaskbarStatsMediaHelper.exe")
+}
 
 $AssetsSource = Join-Path $RepoRoot "assets"
 $AssetsOutput = Join-Path $PublishDir "Assets"

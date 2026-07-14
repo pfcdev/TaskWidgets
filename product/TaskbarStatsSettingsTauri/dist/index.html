@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TaskbarStats Settings</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <h1>TaskbarStats</h1>
+            <p>Widget Studio</p>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-page="library">
+            <span class="dot cyan"></span>
+            <span>
+              <strong>Widget Library</strong>
+              <small>Choose active design</small>
+            </span>
+          </button>
+          <button class="nav-item" data-page="rotation">
+            <span class="dot violet"></span>
+            <span>
+              <strong>Slider Rotation</strong>
+              <small>Order and timing</small>
+            </span>
+          </button>
+          <button class="nav-item" data-page="updates">
+            <span class="dot green"></span>
+            <span>
+              <strong>Updates</strong>
+              <small>Check and install</small>
+            </span>
+          </button>
+        </nav>
+
+        <div class="section-label">Widgets</div>
+        <div id="widget-list" class="widget-list"></div>
+
+        <div class="sidebar-foot">TaskbarStats v0.1.0</div>
+      </aside>
+
+      <section class="content">
+        <div class="topbar">
+          <div>
+            <p id="eyebrow">Widget Library</p>
+            <h2 id="page-title">Codex Status</h2>
+          </div>
+          <span id="save-state" class="save-state">Saved</span>
+        </div>
+
+        <div id="page" class="page"></div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

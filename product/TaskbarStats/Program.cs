@@ -75,6 +75,7 @@ internal static class Program
             initialState: false,
             mode: EventResetMode.ManualReset,
             name: LoaderShutdownEventName);
+        shutdownEvent.Reset();
         _ = Task.Run(() =>
         {
             shutdownEvent.WaitOne();
@@ -100,6 +101,12 @@ internal static class Program
         var weatherTask = Task.Run(
             () => WeatherWorker.RunAsync(cancellation.Token),
             cancellation.Token);
+        var discordTask = Task.Run(
+            () => DiscordVoiceWorker.RunAsync(cancellation.Token),
+            cancellation.Token);
+        var mediaTask = Task.Run(
+            () => MediaWorker.RunAsync(cancellation.Token),
+            cancellation.Token);
         var watchdogTask = Task.Run(
             () => RunExplorerWatchdogAsync(hookPath, cancellation.Token),
             cancellation.Token);
@@ -111,13 +118,21 @@ internal static class Program
             _ = Task.Run(async () =>
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), cancellation.Token);
-                await GitHubUpdater.CheckAndInstallIfAvailableAsync(cancellation.Token);
+                await GitHubUpdater.CheckOnlyIfDueAsync(
+                    TimeSpan.FromHours(6),
+                    cancellation.Token);
             }, cancellation.Token);
         }
 
         try
         {
-            await Task.WhenAll(agentTask, weatherTask, watchdogTask, accountCommandsTask);
+            await Task.WhenAll(
+                agentTask,
+                weatherTask,
+                discordTask,
+                mediaTask,
+                watchdogTask,
+                accountCommandsTask);
         }
         catch (OperationCanceledException)
         {
@@ -138,22 +153,22 @@ internal static class Program
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            try
+            foreach (var process in GetCurrentSessionExplorers())
             {
-                foreach (var process in GetCurrentSessionExplorers())
+                using (process)
                 {
-                    using (process)
+                    try
                     {
                         if (!IsHookLoaded(process, hookPath))
                         {
                             InjectHook(process, hookPath);
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        Log($"Watchdog skipped explorer {process.Id}: {ex.Message}");
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Log($"Watchdog error: {ex.Message}");
             }
 
             await Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);

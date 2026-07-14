@@ -8,11 +8,14 @@ namespace TaskbarStatsProduct;
 
 internal static class WeatherWorker
 {
-    private const string City = "İzmir";
+    private const string DefaultCity = "İzmir";
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan SettingsPollInterval = TimeSpan.FromSeconds(10);
     private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");
     private static readonly string StatusPath = Path.Combine(AppDirectory, "weather-status.json");
+    private static readonly string WidgetSettingsPath = Path.Combine(AppDirectory, "widget-settings.json");
     private static readonly HttpClient Http = new()
     {
         Timeout = TimeSpan.FromSeconds(12)
@@ -23,12 +26,24 @@ internal static class WeatherWorker
         Directory.CreateDirectory(AppDirectory);
         Directory.CreateDirectory(LogsDirectory);
 
+        string? lastCity = null;
+        var nextRefreshAt = DateTimeOffset.MinValue;
+
         while (!cancellationToken.IsCancellationRequested)
         {
+            var city = ReadConfiguredCity();
+            var now = DateTimeOffset.UtcNow;
+            var cityChanged = !string.Equals(city, lastCity, StringComparison.OrdinalIgnoreCase);
+
             try
             {
-                var snapshot = await GetWeatherByCityAsync(City, cancellationToken);
-                WriteStatus(snapshot);
+                if (cityChanged || now >= nextRefreshAt)
+                {
+                    var snapshot = await GetWeatherByCityAsync(city, cancellationToken);
+                    WriteStatus(snapshot);
+                    lastCity = city;
+                    nextRefreshAt = now + RefreshInterval;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -36,11 +51,41 @@ internal static class WeatherWorker
             }
             catch (Exception ex)
             {
-                Log($"Weather update failed: {ex.Message}");
+                Log($"Weather update failed for {city}: {ex.Message}");
+                lastCity = city;
+                nextRefreshAt = now + TimeSpan.FromMinutes(2);
             }
 
-            await Task.Delay(TimeSpan.FromMinutes(15), cancellationToken);
+            await Task.Delay(SettingsPollInterval, cancellationToken);
         }
+    }
+
+    private static string ReadConfiguredCity()
+    {
+        try
+        {
+            if (!File.Exists(WidgetSettingsPath))
+            {
+                return DefaultCity;
+            }
+
+            using var document = JsonDocument.Parse(File.ReadAllText(WidgetSettingsPath, Encoding.UTF8));
+            if (document.RootElement.TryGetProperty("weatherCity", out var cityElement) &&
+                cityElement.ValueKind == JsonValueKind.String)
+            {
+                var city = cityElement.GetString()?.Trim();
+                if (!string.IsNullOrWhiteSpace(city))
+                {
+                    return city;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Weather settings read failed: {ex.Message}");
+        }
+
+        return DefaultCity;
     }
 
     private static async Task<WeatherSnapshot> GetWeatherByCityAsync(

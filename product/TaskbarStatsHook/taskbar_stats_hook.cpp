@@ -36,6 +36,7 @@ Unsupported builds should fail closed and log diagnostics.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@ Unsupported builds should fail closed and log diagnostics.
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.Xaml.Media.Imaging.h>
+#include <winrt/Windows.UI.Xaml.Shapes.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -63,6 +65,7 @@ namespace wuxcp = winrt::Windows::UI::Xaml::Controls::Primitives;
 namespace wuxi = winrt::Windows::UI::Xaml::Input;
 namespace wuxm = winrt::Windows::UI::Xaml::Media;
 namespace wuxmi = winrt::Windows::UI::Xaml::Media::Imaging;
+namespace wuxs = winrt::Windows::UI::Xaml::Shapes;
 namespace gdi = Gdiplus;
 
 std::atomic_bool g_tapInitialized = false;
@@ -70,6 +73,12 @@ std::atomic_bool g_delayedInitializationScheduled = false;
 std::atomic_bool g_uninitializing = false;
 thread_local bool g_initializedForThread = false;
 bool g_inInjectTaskbarStatsTap = false;
+constexpr PCWSTR kTaskbarStatsLayoutMarkerName =
+    L"TaskbarStatsLayoutV20260713Position";
+constexpr double kTaskbarStatsExplicitColumnRightGap = 10.0;
+constexpr double kTaskbarStatsOverlayTrayGap = 28.0;
+constexpr double kTaskbarStatsOverlayMinRightReserve = 220.0;
+constexpr double kTaskbarStatsMaxWidgetWidth = 240.0;
 HWND g_win32ProofWindow = nullptr;
 HWND g_win32ProofParent = nullptr;
 HMODULE g_hookModule = nullptr;
@@ -282,6 +291,7 @@ HMODULE GetCurrentModuleHandle() {
 struct InsertedModule {
     InstanceHandle anchorHandle{};
     wuxc::Grid parent{nullptr};
+    wux::FrameworkElement trayElement{nullptr};
     wux::UIElement root{nullptr};
     wux::DispatcherTimer timer{nullptr};
     uint32_t insertedColumn{};
@@ -309,6 +319,18 @@ bool FileExists(const std::wstring& path) {
     DWORD attributes = GetFileAttributes(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+unsigned long long GetFileWriteVersion(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesEx(path.c_str(), GetFileExInfoStandard, &data)) {
+        return 0;
+    }
+
+    ULARGE_INTEGER value{};
+    value.LowPart = data.ftLastWriteTime.dwLowDateTime;
+    value.HighPart = data.ftLastWriteTime.dwHighDateTime;
+    return value.QuadPart;
 }
 
 wux::UIElement MakeIcon(PCWSTR assetName, PCWSTR fallbackGlyph) {
@@ -374,6 +396,9 @@ wuxm::SolidColorBrush MakeBrush(BYTE a, BYTE r, BYTE g, BYTE b) {
 std::vector<std::wstring> GetAntigravityProjectTitles();
 std::wstring ReadActiveWidgetDesign();
 wux::UIElement MakePngImage(PCWSTR assetName, double width, double height);
+long long CurrentUnixTime();
+long long CurrentUnixMillis();
+bool ExtractJsonInt64(const std::string& json, const char* key, long long& value);
 void SetExpandedMode(wux::UIElement const& root, bool expanded);
 void ShowAccountMenu(wux::FrameworkElement const& root);
 void ShowWeatherMenu(wux::FrameworkElement const& root);
@@ -381,6 +406,9 @@ HWND FindCurrentProcessTaskbarWindow();
 void UpdateTaskbarStatsRoot(wux::UIElement const& root);
 void ShowWidgetLibraryWindow();
 void RefreshInsertedTaskbarStatsRoots();
+void ApplyTaskbarStatsAnchorMargin(wux::FrameworkElement const& root,
+                                   wuxc::Grid const& parent,
+                                   wux::FrameworkElement const& trayElement);
 
 struct CodexAccountInfo {
     std::wstring id;
@@ -495,18 +523,18 @@ wux::FrameworkElement MakeWeatherPanel() {
     weather.Background(MakeBrush(0xF5, 0x11, 0x11, 0x11));
     weather.BorderBrush(MakeBrush(0xFF, 0x2D, 0x2D, 0x2D));
     weather.BorderThickness(wux::ThicknessHelper::FromUniformLength(1));
-    weather.Padding(wux::ThicknessHelper::FromLengths(12, 4, 8, 4));
+    weather.Padding(wux::ThicknessHelper::FromLengths(10, 1, 6, 1));
 
     wuxc::Grid layout;
-    layout.Width(206);
-    layout.Height(28);
+    layout.Width(212);
+    layout.Height(34);
 
     wuxc::ColumnDefinition textColumn;
-    textColumn.Width(wux::GridLengthHelper::FromPixels(118));
+    textColumn.Width(wux::GridLengthHelper::FromPixels(114));
     wuxc::ColumnDefinition tempColumn;
-    tempColumn.Width(wux::GridLengthHelper::FromPixels(44));
+    tempColumn.Width(wux::GridLengthHelper::FromPixels(46));
     wuxc::ColumnDefinition iconColumn;
-    iconColumn.Width(wux::GridLengthHelper::FromPixels(44));
+    iconColumn.Width(wux::GridLengthHelper::FromPixels(52));
     layout.ColumnDefinitions().Append(textColumn);
     layout.ColumnDefinitions().Append(tempColumn);
     layout.ColumnDefinitions().Append(iconColumn);
@@ -514,14 +542,14 @@ wux::FrameworkElement MakeWeatherPanel() {
     wuxc::Grid textBlock;
     textBlock.VerticalAlignment(wux::VerticalAlignment::Center);
     wuxc::RowDefinition cityRow;
-    cityRow.Height(wux::GridLengthHelper::FromPixels(15));
+    cityRow.Height(wux::GridLengthHelper::FromPixels(17));
     wuxc::RowDefinition timeRow;
-    timeRow.Height(wux::GridLengthHelper::FromPixels(12));
+    timeRow.Height(wux::GridLengthHelper::FromPixels(13));
     textBlock.RowDefinitions().Append(cityRow);
     textBlock.RowDefinitions().Append(timeRow);
 
     auto city = MakeNamedText(L"TaskbarStatsWeatherCity", L"Izmir", 11, 0xFF);
-    city.Width(116);
+    city.Width(112);
     city.HorizontalAlignment(wux::HorizontalAlignment::Left);
     city.TextAlignment(wux::TextAlignment::Left);
     city.TextTrimming(wux::TextTrimming::CharacterEllipsis);
@@ -529,7 +557,7 @@ wux::FrameworkElement MakeWeatherPanel() {
 
     auto condition =
         MakeNamedText(L"TaskbarStatsWeatherCondition", L"--:-- • --/--", 9, 0xB8);
-    condition.Width(116);
+    condition.Width(112);
     condition.HorizontalAlignment(wux::HorizontalAlignment::Left);
     condition.TextAlignment(wux::TextAlignment::Left);
     condition.TextTrimming(wux::TextTrimming::CharacterEllipsis);
@@ -547,7 +575,7 @@ wux::FrameworkElement MakeWeatherPanel() {
     temp.TextAlignment(wux::TextAlignment::Right);
     wuxc::Grid::SetColumn(temp, 1);
 
-    auto icon = MakePngImage(L"weather\\rain.png", 48, 34);
+    auto icon = MakePngImage(L"weather\\rain.png", 46, 34);
     SetElementName(icon.as<wux::FrameworkElement>(), L"TaskbarStatsWeatherIcon");
     wuxc::Grid::SetColumn(icon.as<wux::FrameworkElement>(), 2);
 
@@ -556,6 +584,324 @@ wux::FrameworkElement MakeWeatherPanel() {
     layout.Children().Append(icon);
     weather.Child(layout);
     return weather;
+}
+
+wux::FrameworkElement MakeDiscordPanel() {
+    wuxc::Border discord;
+    discord.Name(L"TaskbarStatsDiscordPanel");
+    discord.Height(36);
+    discord.Width(184);
+    discord.Visibility(wux::Visibility::Collapsed);
+    discord.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(8));
+    discord.Background(MakeBrush(0xF5, 0x11, 0x11, 0x11));
+    discord.BorderBrush(MakeBrush(0xFF, 0x2D, 0x2D, 0x2D));
+    discord.BorderThickness(wux::ThicknessHelper::FromUniformLength(1));
+    discord.Padding(wux::ThicknessHelper::FromLengths(8, 3, 8, 3));
+
+    wuxc::StackPanel row;
+    row.Orientation(wuxc::Orientation::Horizontal);
+    row.VerticalAlignment(wux::VerticalAlignment::Center);
+    row.HorizontalAlignment(wux::HorizontalAlignment::Center);
+
+    for (int i = 0; i < 5; ++i) {
+        std::wstring frameName = L"TaskbarStatsDiscordAvatarFrame" + std::to_wstring(i);
+        std::wstring avatarName = L"TaskbarStatsDiscordAvatarEllipse" + std::to_wstring(i);
+
+        wuxc::Border frame;
+        frame.Name(frameName);
+        frame.Width(32);
+        frame.Height(32);
+        frame.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(16));
+        frame.BorderThickness(wux::ThicknessHelper::FromUniformLength(2));
+        frame.BorderBrush(MakeBrush(0x00, 0x00, 0x00, 0x00));
+        frame.Background(MakeBrush(0x00, 0x00, 0x00, 0x00));
+        frame.Margin(wux::ThicknessHelper::FromLengths(2, 0, 2, 0));
+        frame.Visibility(wux::Visibility::Collapsed);
+        frame.Padding(wux::ThicknessHelper::FromUniformLength(1));
+
+        wuxs::Ellipse avatar;
+        avatar.Name(avatarName);
+        avatar.Width(24);
+        avatar.Height(24);
+        avatar.HorizontalAlignment(wux::HorizontalAlignment::Center);
+        avatar.VerticalAlignment(wux::VerticalAlignment::Center);
+        avatar.Opacity(0.38);
+        avatar.Fill(MakeBrush(0xFF, 0x1F, 0x24, 0x2D));
+        frame.Child(avatar);
+        row.Children().Append(frame.as<wux::UIElement>());
+    }
+
+    discord.Child(row);
+    return discord;
+}
+
+wux::FrameworkElement MakeBtcPanel() {
+    wuxc::Border panel;
+    panel.Name(L"TaskbarStatsBtcPanel");
+    panel.Width(220);
+    panel.Height(44);
+    panel.Visibility(wux::Visibility::Collapsed);
+    panel.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(8));
+    panel.Background(MakeBrush(0xFF, 0x12, 0x07, 0x18));
+    panel.Padding(wux::ThicknessHelper::FromLengths(12, 5, 12, 5));
+
+    wuxc::Grid layout;
+    layout.Width(196);
+    layout.Height(34);
+
+    wuxc::RowDefinition topRow;
+    topRow.Height(wux::GridLengthHelper::FromPixels(17));
+    wuxc::RowDefinition bottomRow;
+    bottomRow.Height(wux::GridLengthHelper::FromPixels(17));
+    layout.RowDefinitions().Append(topRow);
+    layout.RowDefinitions().Append(bottomRow);
+
+    wuxc::ColumnDefinition labelColumn;
+    labelColumn.Width(wux::GridLengthHelper::FromPixels(70));
+    wuxc::ColumnDefinition valueColumn;
+    valueColumn.Width(wux::GridLengthHelper::FromPixels(108));
+    wuxc::ColumnDefinition iconColumn;
+    iconColumn.Width(wux::GridLengthHelper::FromPixels(18));
+    layout.ColumnDefinitions().Append(labelColumn);
+    layout.ColumnDefinitions().Append(valueColumn);
+    layout.ColumnDefinitions().Append(iconColumn);
+
+    auto dateLabel = MakeNamedText(L"TaskbarStatsBtcDateLabel", L"Current date", 10, 0xD8);
+    dateLabel.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    dateLabel.TextAlignment(wux::TextAlignment::Left);
+    dateLabel.Foreground(MakeBrush(0xD8, 0xD0, 0xBF, 0xD8));
+    dateLabel.Width(70);
+    wuxc::Grid::SetRow(dateLabel, 0);
+    wuxc::Grid::SetColumn(dateLabel, 0);
+
+    auto dateValue =
+        MakeNamedText(L"TaskbarStatsBtcDateValue", L"January 22, 2022 - 7:23 AM", 10, 0xFF);
+    dateValue.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    dateValue.TextAlignment(wux::TextAlignment::Right);
+    dateValue.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    dateValue.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    dateValue.Width(126);
+    wuxc::Grid::SetRow(dateValue, 0);
+    wuxc::Grid::SetColumn(dateValue, 1);
+    wuxc::Grid::SetColumnSpan(dateValue, 2);
+
+    wuxc::StackPanel fees;
+    fees.Orientation(wuxc::Orientation::Horizontal);
+    fees.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    fees.VerticalAlignment(wux::VerticalAlignment::Center);
+    wuxc::Grid::SetRow(fees, 1);
+    wuxc::Grid::SetColumn(fees, 0);
+
+    auto feesText = MakeText(L"Fees", 10, 0xD8);
+    feesText.Foreground(MakeBrush(0xD8, 0xD0, 0xBF, 0xD8));
+    feesText.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    feesText.TextAlignment(wux::TextAlignment::Left);
+    auto arrow = MakeText(L"\x2197", 13, 0xFF);
+    arrow.Margin(wux::ThicknessHelper::FromLengths(7, -1, 0, 0));
+    arrow.Foreground(MakeBrush(0xFF, 0x17, 0xFF, 0xCF));
+    fees.Children().Append(feesText.as<wux::UIElement>());
+    fees.Children().Append(arrow.as<wux::UIElement>());
+
+    auto feeValue = MakeNamedText(L"TaskbarStatsBtcFeeValue", L"0.00004353 ETH", 12, 0xFF);
+    feeValue.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    feeValue.TextAlignment(wux::TextAlignment::Right);
+    feeValue.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    feeValue.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    feeValue.Width(108);
+    wuxc::Grid::SetRow(feeValue, 1);
+    wuxc::Grid::SetColumn(feeValue, 1);
+
+    auto ethIcon = MakeNamedText(L"TaskbarStatsBtcEthIcon", L"\x25C7", 15, 0xFF);
+    ethIcon.Foreground(MakeBrush(0xFF, 0xC6, 0x69, 0xFF));
+    ethIcon.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    ethIcon.VerticalAlignment(wux::VerticalAlignment::Center);
+    wuxc::Grid::SetRow(ethIcon, 1);
+    wuxc::Grid::SetColumn(ethIcon, 2);
+
+    layout.Children().Append(dateLabel.as<wux::UIElement>());
+    layout.Children().Append(dateValue.as<wux::UIElement>());
+    layout.Children().Append(fees.as<wux::UIElement>());
+    layout.Children().Append(feeValue.as<wux::UIElement>());
+    layout.Children().Append(ethIcon.as<wux::UIElement>());
+    panel.Child(layout);
+    return panel;
+}
+
+wux::FrameworkElement MakeMediaPanel() {
+    wuxc::Border panel;
+    panel.Name(L"TaskbarStatsMediaPanel");
+    panel.Width(220);
+    panel.Height(44);
+    panel.Visibility(wux::Visibility::Collapsed);
+    panel.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(9));
+    panel.Background(MakeBrush(0xFF, 0xFA, 0xFA, 0xF8));
+    panel.Padding(wux::ThicknessHelper::FromUniformLength(0));
+
+    wuxc::Grid layout;
+    layout.Width(220);
+    layout.Height(44);
+
+    wuxc::Grid content;
+    content.Width(197);
+    content.Height(30);
+    content.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    content.VerticalAlignment(wux::VerticalAlignment::Center);
+    content.Margin(wux::ThicknessHelper::FromLengths(12, 0, 11, 0));
+
+    wuxc::ColumnDefinition coverColumn;
+    coverColumn.Width(wux::GridLengthHelper::FromPixels(49));
+    wuxc::ColumnDefinition textColumn;
+    textColumn.Width(wux::GridLengthHelper::FromPixels(126));
+    wuxc::ColumnDefinition buttonColumn;
+    buttonColumn.Width(wux::GridLengthHelper::FromPixels(22));
+    content.ColumnDefinitions().Append(coverColumn);
+    content.ColumnDefinitions().Append(textColumn);
+    content.ColumnDefinitions().Append(buttonColumn);
+
+    wuxc::Border cover;
+    cover.Name(L"TaskbarStatsMediaCover");
+    cover.Width(49);
+    cover.Height(30);
+    cover.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(4));
+    cover.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    cover.VerticalAlignment(wux::VerticalAlignment::Center);
+    cover.Background(MakeBrush(0xFF, 0x17, 0x1B, 0x24));
+    std::wstring coverPath = GetAssetsFolder() + L"widgets\\media_cover.png";
+    if (FileExists(coverPath)) {
+        wuxmi::BitmapImage source;
+        source.UriSource(wf::Uri(ToFileUri(coverPath)));
+        wuxm::ImageBrush brush;
+        brush.ImageSource(source);
+        brush.Stretch(wuxm::Stretch::UniformToFill);
+        cover.Background(brush);
+    }
+    wuxc::Grid::SetColumn(cover, 0);
+
+    wuxc::Grid textGrid;
+    textGrid.Width(112);
+    textGrid.Height(30);
+    textGrid.Margin(wux::ThicknessHelper::FromLengths(12, 0, 0, 0));
+    textGrid.VerticalAlignment(wux::VerticalAlignment::Center);
+    wuxc::RowDefinition titleRow;
+    titleRow.Height(wux::GridLengthHelper::FromPixels(16));
+    wuxc::RowDefinition artistRow;
+    artistRow.Height(wux::GridLengthHelper::FromPixels(14));
+    textGrid.RowDefinitions().Append(titleRow);
+    textGrid.RowDefinitions().Append(artistRow);
+    wuxc::Grid::SetColumn(textGrid, 1);
+
+    wuxc::Grid titleViewport;
+    titleViewport.Width(112);
+    titleViewport.Height(16);
+    wuxm::RectangleGeometry titleClip;
+    titleClip.Rect(wf::Rect{0, 0, 112, 16});
+    titleViewport.Clip(titleClip);
+    wuxc::Grid::SetRow(titleViewport, 0);
+
+    wuxc::StackPanel titleMarquee;
+    titleMarquee.Name(L"TaskbarStatsMediaTitleMarquee");
+    titleMarquee.Orientation(wuxc::Orientation::Horizontal);
+    titleMarquee.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    titleMarquee.VerticalAlignment(wux::VerticalAlignment::Center);
+    wuxm::TranslateTransform titleTransform;
+    titleMarquee.RenderTransform(titleTransform);
+
+    auto title = MakeNamedText(L"TaskbarStatsMediaTitle", L"No media", 11, 0xFF);
+    title.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    title.TextAlignment(wux::TextAlignment::Left);
+    title.Foreground(MakeBrush(0xFF, 0x00, 0x00, 0x00));
+    title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    title.Width(112);
+
+    auto titleClone = MakeNamedText(L"TaskbarStatsMediaTitleClone", L"", 11, 0xFF);
+    titleClone.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    titleClone.TextAlignment(wux::TextAlignment::Left);
+    titleClone.Foreground(MakeBrush(0xFF, 0x00, 0x00, 0x00));
+    titleClone.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    titleClone.Width(0);
+
+    titleMarquee.Children().Append(title.as<wux::UIElement>());
+    titleMarquee.Children().Append(titleClone.as<wux::UIElement>());
+    titleViewport.Children().Append(titleMarquee.as<wux::UIElement>());
+
+    auto artist = MakeNamedText(L"TaskbarStatsMediaArtist", L"Open a player", 9, 0xF0);
+    artist.HorizontalAlignment(wux::HorizontalAlignment::Left);
+    artist.TextAlignment(wux::TextAlignment::Left);
+    artist.TextTrimming(wux::TextTrimming::CharacterEllipsis);
+    artist.Foreground(MakeBrush(0xF0, 0x00, 0x00, 0x00));
+    artist.Width(112);
+    wuxc::Grid::SetRow(artist, 1);
+
+    textGrid.Children().Append(titleViewport.as<wux::UIElement>());
+    textGrid.Children().Append(artist.as<wux::UIElement>());
+
+    wuxc::Border playButton;
+    playButton.Name(L"TaskbarStatsMediaPlayButton");
+    playButton.Width(18);
+    playButton.Height(18);
+    playButton.CornerRadius(wux::CornerRadiusHelper::FromUniformRadius(9));
+    playButton.HorizontalAlignment(wux::HorizontalAlignment::Right);
+    playButton.VerticalAlignment(wux::VerticalAlignment::Center);
+    playButton.Background(MakeBrush(0xFF, 0x00, 0x00, 0x00));
+    wuxc::Grid::SetColumn(playButton, 2);
+
+    wuxc::FontIcon playIcon;
+    playIcon.Name(L"TaskbarStatsMediaPlayIcon");
+    playIcon.Glyph(L"\xE768");
+    playIcon.FontFamily(wuxm::FontFamily(L"Segoe MDL2 Assets"));
+    playIcon.FontSize(9);
+    playIcon.Width(18);
+    playIcon.Height(18);
+    playIcon.HorizontalAlignment(wux::HorizontalAlignment::Center);
+    playIcon.VerticalAlignment(wux::VerticalAlignment::Center);
+    playIcon.Foreground(MakeBrush(0xFF, 0xFF, 0xFF, 0xFF));
+    playButton.Child(playIcon);
+
+    content.Children().Append(cover.as<wux::UIElement>());
+    content.Children().Append(textGrid.as<wux::UIElement>());
+    content.Children().Append(playButton.as<wux::UIElement>());
+    layout.Children().Append(content.as<wux::UIElement>());
+
+    panel.Child(layout);
+    return panel;
+}
+
+void ShowWidgetContextMenu() {
+    constexpr UINT_PTR kSettingsCommand = 1001;
+    constexpr UINT_PTR kQuitCommand = 1002;
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+
+    AppendMenuW(menu, MF_STRING, kSettingsCommand, L"Settings");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kQuitCommand, L"Quit TaskbarStats");
+
+    POINT point{};
+    GetCursorPos(&point);
+    HWND owner = GetForegroundWindow();
+    if (!owner) {
+        owner = GetDesktopWindow();
+    }
+
+    SetForegroundWindow(owner);
+    UINT command = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        point.x,
+        point.y,
+        0,
+        owner,
+        nullptr);
+    DestroyMenu(menu);
+
+    if (command == kSettingsCommand) {
+        WriteTaskbarStatsCommand(L"openSettings");
+    } else if (command == kQuitCommand) {
+        WriteTaskbarStatsCommand(L"quit");
+    }
 }
 
 wux::FrameworkElement MakeTaskbarStatsRoot() {
@@ -674,6 +1020,15 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
     root.Children().Append(compact.as<wux::UIElement>());
     root.Children().Append(expanded.as<wux::UIElement>());
     root.Children().Append(MakeWeatherPanel().as<wux::UIElement>());
+    root.Children().Append(MakeDiscordPanel().as<wux::UIElement>());
+    root.Children().Append(MakeBtcPanel().as<wux::UIElement>());
+    root.Children().Append(MakeMediaPanel().as<wux::UIElement>());
+
+    wuxc::Border layoutMarker;
+    layoutMarker.Name(kTaskbarStatsLayoutMarkerName);
+    layoutMarker.Visibility(wux::Visibility::Collapsed);
+    root.Children().Append(layoutMarker.as<wux::UIElement>());
+
     root.PointerEntered([root](auto const&, auto const&) {
         SetExpandedMode(root.as<wux::UIElement>(), true);
     });
@@ -681,11 +1036,27 @@ wux::FrameworkElement MakeTaskbarStatsRoot() {
         SetExpandedMode(root.as<wux::UIElement>(), false);
     });
     root.Tapped([root](auto const&, wuxi::TappedRoutedEventArgs const& args) {
-        if (ReadActiveWidgetDesign() == L"weather-static") {
+        std::wstring activeDesign = ReadActiveWidgetDesign();
+        if (activeDesign == L"weather-static") {
             ShowWeatherMenu(root);
+        } else if (activeDesign == L"discord-voice") {
+            ShowWidgetLibraryWindow();
+        } else if (activeDesign == L"media-player") {
+            wf::Point point = args.GetPosition(root);
+            if (point.X >= 190.0) {
+                WriteTaskbarStatsCommand(L"mediaToggle");
+            } else {
+                ShowWidgetLibraryWindow();
+            }
+        } else if (activeDesign == L"btc-fees") {
+            ShowWidgetLibraryWindow();
         } else {
             ShowAccountMenu(root);
         }
+        args.Handled(true);
+    });
+    root.RightTapped([](auto const&, wuxi::RightTappedRoutedEventArgs const& args) {
+        ShowWidgetContextMenu();
         args.Handled(true);
     });
 
@@ -698,6 +1069,14 @@ std::wstring GetCodexStatusPath() {
 
 std::wstring GetWeatherStatusPath() {
     return GetTaskbarStatsPath(L"weather-status.json");
+}
+
+std::wstring GetDiscordStatusPath() {
+    return GetTaskbarStatsPath(L"discord-voice-status.json");
+}
+
+std::wstring GetMediaStatusPath() {
+    return GetTaskbarStatsPath(L"media-status.json");
 }
 
 std::wstring GetWidgetSettingsPath() {
@@ -786,36 +1165,209 @@ bool ExtractJsonString(const std::string& json,
     }
 
     std::string raw = json.substr(start, end - start);
-    int wideLength = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(),
-                                         static_cast<int>(raw.size()), nullptr, 0);
+    std::string decoded;
+    decoded.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '\\' && i + 1 < raw.size()) {
+            char next = raw[++i];
+            switch (next) {
+                case '\\':
+                case '"':
+                case '/':
+                    decoded += next;
+                    break;
+                case 'n':
+                    decoded += '\n';
+                    break;
+                case 'r':
+                    decoded += '\r';
+                    break;
+                case 't':
+                    decoded += '\t';
+                    break;
+                default:
+                    decoded += next;
+                    break;
+            }
+        } else {
+            decoded += raw[i];
+        }
+    }
+
+    int wideLength = MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(),
+                                         static_cast<int>(decoded.size()), nullptr, 0);
     if (wideLength <= 0) {
-        value.assign(raw.begin(), raw.end());
+        value.assign(decoded.begin(), decoded.end());
         return true;
     }
 
     value.resize(wideLength);
-    MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), static_cast<int>(raw.size()),
+    MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(), static_cast<int>(decoded.size()),
                         value.data(), wideLength);
     return true;
 }
 
+bool ExtractJsonBool(const std::string& json, const char* key, bool& value) {
+    std::string pattern = "\"";
+    pattern += key;
+    pattern += "\":";
+
+    size_t keyPos = json.find(pattern);
+    if (keyPos == std::string::npos) {
+        return false;
+    }
+
+    size_t start = json.find_first_not_of(" \t\r\n", keyPos + pattern.size());
+    if (start == std::string::npos) {
+        return false;
+    }
+
+    if (json.compare(start, 4, "true") == 0) {
+        value = true;
+        return true;
+    }
+
+    if (json.compare(start, 5, "false") == 0) {
+        value = false;
+        return true;
+    }
+
+    return false;
+}
+
 bool IsKnownWidgetDesign(const std::wstring& designId) {
     return _wcsicmp(designId.c_str(), L"codex-status") == 0 ||
-           _wcsicmp(designId.c_str(), L"weather-static") == 0;
+           _wcsicmp(designId.c_str(), L"weather-static") == 0 ||
+           _wcsicmp(designId.c_str(), L"discord-voice") == 0 ||
+           _wcsicmp(designId.c_str(), L"btc-fees") == 0 ||
+           _wcsicmp(designId.c_str(), L"media-player") == 0;
+}
+
+std::vector<std::wstring> ExtractJsonStringArray(const std::string& json,
+                                                 const char* key) {
+    std::vector<std::wstring> values;
+    std::string pattern = "\"";
+    pattern += key;
+    pattern += "\"";
+
+    size_t keyPos = json.find(pattern);
+    size_t arrayStart = keyPos == std::string::npos
+                            ? std::string::npos
+                            : json.find('[', keyPos + pattern.size());
+    size_t arrayEnd = arrayStart == std::string::npos
+                          ? std::string::npos
+                          : json.find(']', arrayStart);
+    if (arrayStart == std::string::npos || arrayEnd == std::string::npos) {
+        return values;
+    }
+
+    size_t cursor = arrayStart + 1;
+    while (cursor < arrayEnd) {
+        size_t quote = json.find('"', cursor);
+        if (quote == std::string::npos || quote >= arrayEnd) {
+            break;
+        }
+
+        size_t end = quote + 1;
+        bool escaped = false;
+        while (end < arrayEnd) {
+            char ch = json[end];
+            if (!escaped && ch == '"') {
+                break;
+            }
+
+            escaped = !escaped && ch == '\\';
+            if (ch != '\\') {
+                escaped = false;
+            }
+            ++end;
+        }
+
+        if (end >= arrayEnd) {
+            break;
+        }
+
+        std::string itemJson = "{\"value\":\"" + json.substr(quote + 1, end - quote - 1) + "\"}";
+        std::wstring item;
+        if (ExtractJsonString(itemJson, "value", item) && IsKnownWidgetDesign(item)) {
+            bool exists = std::find_if(values.begin(), values.end(),
+                                       [&item](const std::wstring& value) {
+                                           return _wcsicmp(value.c_str(), item.c_str()) == 0;
+                                       }) != values.end();
+            if (!exists) {
+                values.push_back(item);
+            }
+        }
+
+        cursor = end + 1;
+    }
+
+    return values;
+}
+
+struct WidgetRuntimeSettings {
+    std::wstring activeDesign = L"codex-status";
+    bool rotationEnabled{};
+    long long rotationIntervalSecs = 30;
+    std::vector<std::wstring> rotationDesigns;
+    bool discordBackgroundEnabled = true;
+    bool mediaDarkMode = true;
+    long long widgetOffsetPx = 0;
+};
+
+WidgetRuntimeSettings ReadWidgetRuntimeSettings() {
+    WidgetRuntimeSettings settings;
+    std::string json = ReadUtf8File(GetWidgetSettingsPath());
+    std::wstring activeDesign;
+    if (!json.empty() && ExtractJsonString(json, "activeDesign", activeDesign) &&
+        IsKnownWidgetDesign(activeDesign)) {
+        settings.activeDesign = activeDesign;
+    }
+
+    bool rotationEnabled = false;
+    if (ExtractJsonBool(json, "rotationEnabled", rotationEnabled)) {
+        settings.rotationEnabled = rotationEnabled;
+    }
+
+    bool discordBackgroundEnabled = true;
+    if (ExtractJsonBool(json, "discordBackgroundEnabled", discordBackgroundEnabled)) {
+        settings.discordBackgroundEnabled = discordBackgroundEnabled;
+    }
+
+    bool mediaDarkMode = true;
+    if (ExtractJsonBool(json, "mediaDarkMode", mediaDarkMode)) {
+        settings.mediaDarkMode = mediaDarkMode;
+    }
+
+    long long rotationInterval = 0;
+    if (ExtractJsonInt64(json, "rotationIntervalSecs", rotationInterval)) {
+        settings.rotationIntervalSecs = std::clamp(rotationInterval, 5LL, 3600LL);
+    }
+
+    long long widgetOffset = 0;
+    if (ExtractJsonInt64(json, "widgetOffsetPx", widgetOffset)) {
+        settings.widgetOffsetPx = std::clamp(widgetOffset, 0LL, 480LL);
+    }
+
+    settings.rotationDesigns = ExtractJsonStringArray(json, "rotationDesigns");
+    if (settings.rotationDesigns.empty()) {
+        settings.rotationDesigns.push_back(settings.activeDesign);
+    }
+
+    return settings;
 }
 
 std::wstring ReadActiveWidgetDesign() {
-    std::wstring activeDesign;
-    std::string json = ReadUtf8File(GetWidgetSettingsPath());
-    if (!json.empty()) {
-        ExtractJsonString(json, "activeDesign", activeDesign);
+    WidgetRuntimeSettings settings = ReadWidgetRuntimeSettings();
+    if (settings.rotationEnabled && !settings.rotationDesigns.empty()) {
+        long long interval = std::max(5LL, settings.rotationIntervalSecs);
+        size_t index = static_cast<size_t>(
+            (CurrentUnixTime() / interval) %
+            static_cast<long long>(settings.rotationDesigns.size()));
+        return settings.rotationDesigns[index];
     }
 
-    if (_wcsicmp(activeDesign.c_str(), L"weather-static") == 0) {
-        return L"weather-static";
-    }
-
-    return L"codex-status";
+    return settings.activeDesign;
 }
 
 bool WriteActiveWidgetDesign(const std::wstring& designId) {
@@ -823,8 +1375,31 @@ bool WriteActiveWidgetDesign(const std::wstring& designId) {
         return false;
     }
 
-    std::string json = "{\n  \"activeDesign\": \"" +
-                       JsonEscapeUtf8(designId) + "\"\n}\n";
+    WidgetRuntimeSettings settings = ReadWidgetRuntimeSettings();
+    std::vector<std::wstring> rotationDesigns = settings.rotationDesigns;
+    if (rotationDesigns.empty()) {
+        rotationDesigns.push_back(designId);
+    }
+
+    std::string json = "{\n  \"activeDesign\": \"" + JsonEscapeUtf8(designId) +
+                       "\",\n  \"rotationEnabled\": " +
+                       (settings.rotationEnabled ? "true" : "false") +
+                       ",\n  \"rotationIntervalSecs\": " +
+                       std::to_string(settings.rotationIntervalSecs) +
+                       ",\n  \"discordBackgroundEnabled\": " +
+                       (settings.discordBackgroundEnabled ? "true" : "false") +
+                       ",\n  \"mediaDarkMode\": " +
+                       (settings.mediaDarkMode ? "true" : "false") +
+                       ",\n  \"widgetOffsetPx\": " +
+                       std::to_string(settings.widgetOffsetPx) +
+                       ",\n  \"rotationDesigns\": [";
+    for (size_t i = 0; i < rotationDesigns.size(); ++i) {
+        if (i > 0) {
+            json += ", ";
+        }
+        json += "\"" + JsonEscapeUtf8(rotationDesigns[i]) + "\"";
+    }
+    json += "]\n}\n";
     return WriteUtf8File(GetWidgetSettingsPath(), json);
 }
 
@@ -1226,15 +1801,28 @@ void RebuildAccountMenuHitItems(int width) {
     }
 
     y += 12;
+    std::wstring activeAccountId;
+    for (const auto& account : g_accountMenuAccounts) {
+        if (account.active) {
+            activeAccountId = account.id;
+            break;
+        }
+    }
+
     constexpr PCWSTR commands[] = {
         L"addAccount",
         L"loginActiveAccount",
-        L"deleteActiveAccount",
+        L"deleteAccount",
         L"restartIde"};
     for (PCWSTR command : commands) {
+        std::wstring accountId;
+        if (_wcsicmp(command, L"deleteAccount") == 0) {
+            accountId = activeAccountId;
+        }
         g_accountMenuHitItems.push_back(AccountMenuHitItem{
             .rect = RECT{padding, y, width - padding, y + actionHeight},
             .command = command,
+            .accountId = accountId,
         });
         y += actionHeight;
     }
@@ -1911,8 +2499,10 @@ std::wstring WeatherIconAsset(int code) {
     if (code == 45 || code == 48) {
         return L"weather\\fog.png";
     }
-    if ((code >= 51 && code <= 57) || (code >= 61 && code <= 65) ||
-        (code >= 80 && code <= 82)) {
+    if (code >= 51 && code <= 57) {
+        return L"weather\\drizzle.png";
+    }
+    if ((code >= 61 && code <= 65) || (code >= 80 && code <= 82)) {
         return L"weather\\rain.png";
     }
     if (code >= 71 && code <= 77) {
@@ -1976,6 +2566,13 @@ std::wstring FormatWeatherDate(long long unixTime) {
     return buffer;
 }
 
+std::wstring FormatMediaPosition(long long seconds) {
+    long long clamped = std::clamp(seconds, 0LL, 99LL * 60LL + 59LL);
+    WCHAR buffer[16]{};
+    swprintf_s(buffer, L"%02lld.%02lld", clamped / 60, clamped % 60);
+    return buffer;
+}
+
 WeatherSnapshot ReadWeatherSnapshot() {
     WeatherSnapshot snapshot;
     std::string json = ReadUtf8File(GetWeatherStatusPath());
@@ -2029,6 +2626,111 @@ WeatherSnapshot ReadWeatherSnapshot() {
             snapshot.days.push_back(day);
             cursor = objectEnd + 1;
         }
+    }
+
+    return snapshot;
+}
+
+struct DiscordVoiceUserSnapshot {
+    std::wstring id;
+    std::wstring displayName;
+    std::wstring avatarPath;
+    std::wstring animatedAvatarPath;
+    bool speaking{};
+};
+
+struct DiscordVoiceSnapshot {
+    bool loaded{};
+    bool connected{};
+    std::wstring status = L"Discord";
+    std::wstring channelName;
+    std::vector<DiscordVoiceUserSnapshot> users;
+};
+
+DiscordVoiceSnapshot ReadDiscordVoiceSnapshot() {
+    DiscordVoiceSnapshot snapshot;
+    std::string json = ReadUtf8File(GetDiscordStatusPath());
+    if (json.empty()) {
+        return snapshot;
+    }
+
+    snapshot.loaded = true;
+    ExtractJsonBool(json, "connected", snapshot.connected);
+    ExtractJsonString(json, "status", snapshot.status);
+    ExtractJsonString(json, "channelName", snapshot.channelName);
+
+    size_t usersKey = json.find("\"users\"");
+    size_t arrayStart = usersKey == std::string::npos
+                            ? std::string::npos
+                            : json.find('[', usersKey);
+    size_t arrayEnd = arrayStart == std::string::npos
+                          ? std::string::npos
+                          : json.find(']', arrayStart);
+    if (arrayStart != std::string::npos && arrayEnd != std::string::npos) {
+        size_t cursor = arrayStart;
+        while (cursor < arrayEnd && snapshot.users.size() < 5) {
+            size_t objectStart = json.find('{', cursor);
+            if (objectStart == std::string::npos || objectStart >= arrayEnd) {
+                break;
+            }
+
+            size_t objectEnd = json.find('}', objectStart);
+            if (objectEnd == std::string::npos || objectEnd > arrayEnd) {
+                break;
+            }
+
+            std::string object = json.substr(objectStart, objectEnd - objectStart + 1);
+            DiscordVoiceUserSnapshot user;
+            ExtractJsonString(object, "id", user.id);
+            ExtractJsonString(object, "displayName", user.displayName);
+            ExtractJsonString(object, "avatarPath", user.avatarPath);
+            ExtractJsonString(object, "animatedAvatarPath", user.animatedAvatarPath);
+            ExtractJsonBool(object, "speaking", user.speaking);
+            if (!user.id.empty() || !user.avatarPath.empty()) {
+                snapshot.users.push_back(user);
+            }
+            cursor = objectEnd + 1;
+        }
+    }
+
+    return snapshot;
+}
+
+struct MediaSnapshot {
+    bool loaded{};
+    bool active{};
+    bool playing{};
+    long long positionSeconds = 34;
+    std::wstring title;
+    std::wstring artist;
+    std::wstring coverPath;
+    std::wstring backgroundLeftColor;
+    std::wstring backgroundRightColor;
+    std::wstring accentColor;
+    std::wstring textColor;
+};
+
+MediaSnapshot ReadMediaSnapshot() {
+    MediaSnapshot snapshot;
+    snapshot.coverPath = GetAssetsFolder() + L"widgets\\media_cover.png";
+    std::string json = ReadUtf8File(GetMediaStatusPath());
+    if (json.empty()) {
+        return snapshot;
+    }
+
+    snapshot.loaded = true;
+    ExtractJsonBool(json, "active", snapshot.active);
+    ExtractJsonBool(json, "playing", snapshot.playing);
+    ExtractJsonString(json, "title", snapshot.title);
+    ExtractJsonString(json, "artist", snapshot.artist);
+    ExtractJsonString(json, "coverPath", snapshot.coverPath);
+    ExtractJsonString(json, "backgroundLeftColor", snapshot.backgroundLeftColor);
+    ExtractJsonString(json, "backgroundRightColor", snapshot.backgroundRightColor);
+    ExtractJsonString(json, "accentColor", snapshot.accentColor);
+    ExtractJsonString(json, "textColor", snapshot.textColor);
+    long long position = 0;
+    if (ExtractJsonInt64(json, "positionSeconds", position)) {
+        snapshot.positionSeconds = std::clamp(position, 0LL, 24LL * 60LL * 60LL);
     }
 
     return snapshot;
@@ -2321,6 +3023,19 @@ long long CurrentUnixTime() {
                                   10000000ULL);
 }
 
+long long CurrentUnixMillis() {
+    FILETIME fileTime{};
+    GetSystemTimeAsFileTime(&fileTime);
+
+    ULARGE_INTEGER value{};
+    value.LowPart = fileTime.dwLowDateTime;
+    value.HighPart = fileTime.dwHighDateTime;
+
+    constexpr unsigned long long windowsToUnix100ns = 116444736000000000ULL;
+    return static_cast<long long>((value.QuadPart - windowsToUnix100ns) /
+                                  10000ULL);
+}
+
 std::wstring FormatPercent(double value) {
     if (value < 0) {
         return L"--";
@@ -2600,6 +3315,69 @@ void SetNamedText(wux::UIElement const& root,
     }
 }
 
+void SetMediaTitleText(wux::UIElement const& root, const std::wstring& text) {
+    auto first = FindNamedTextBlock(root, L"TaskbarStatsMediaTitle");
+    auto second = FindNamedTextBlock(root, L"TaskbarStatsMediaTitleClone");
+    auto marqueeElement =
+        FindNamedFrameworkElement(root, L"TaskbarStatsMediaTitleMarquee");
+    if (!first || !second || !marqueeElement) {
+        return;
+    }
+
+    std::wstring value = Trim(text);
+    if (value.empty()) {
+        value = L"Media";
+    }
+
+    constexpr double viewportWidth = 112.0;
+    constexpr double averageCharWidth = 6.2;
+    constexpr double separatorWidth = 18.0;
+    constexpr double pixelsPerSecond = 18.0;
+    const std::wstring separator = L"  •";
+
+    double textWidth = static_cast<double>(value.size()) * averageCharWidth;
+    if (textWidth <= viewportWidth) {
+        if (first.Text() != value) {
+            first.Text(value);
+        }
+        if (second.Text() != L"") {
+            second.Text(L"");
+        }
+        first.Width(viewportWidth);
+        second.Width(0);
+        auto transform =
+            marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
+        if (!transform) {
+            transform = wuxm::TranslateTransform();
+            marqueeElement.RenderTransform(transform);
+        }
+        transform.X(0);
+        return;
+    }
+
+    std::wstring item = value + separator;
+    double itemWidth = textWidth + separatorWidth;
+    if (first.Text() != item) {
+        first.Text(item);
+    }
+    if (second.Text() != item) {
+        second.Text(item);
+    }
+    first.Width(itemWidth);
+    second.Width(itemWidth);
+
+    auto transform =
+        marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
+    if (!transform) {
+        transform = wuxm::TranslateTransform();
+        marqueeElement.RenderTransform(transform);
+    }
+
+    double elapsed = static_cast<double>(CurrentUnixMillis() % 600000LL) / 1000.0;
+    double offset = std::fmod(elapsed * pixelsPerSecond, itemWidth);
+    transform.X(-offset);
+}
+
 void SetNamedTextColor(wux::UIElement const& root,
                        PCWSTR name,
                        winrt::Windows::UI::Color color) {
@@ -2626,6 +3404,246 @@ void SetNamedImageSource(wux::UIElement const& root,
     wuxmi::BitmapImage source;
     source.UriSource(wf::Uri(ToFileUri(assetPath)));
     image.Source(source);
+}
+
+void SetNamedImageFileSource(wux::UIElement const& root,
+                             PCWSTR name,
+                             const std::wstring& path) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto image = element ? element.try_as<wuxc::Image>() : nullptr;
+    if (!image || path.empty() || !FileExists(path)) {
+        return;
+    }
+
+    wuxmi::BitmapImage source;
+    source.UriSource(wf::Uri(ToFileUri(path)));
+    image.Source(source);
+}
+
+void SetNamedEllipseImageFill(wux::UIElement const& root,
+                              PCWSTR name,
+                              const std::wstring& path) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto ellipse = element ? element.try_as<wuxs::Ellipse>() : nullptr;
+    if (!ellipse || path.empty() || !FileExists(path)) {
+        return;
+    }
+
+    winrt::hstring pathTag(path);
+    winrt::hstring currentTag =
+        winrt::unbox_value_or<winrt::hstring>(element.Tag(), winrt::hstring{});
+    if (currentTag == pathTag) {
+        return;
+    }
+
+    wuxmi::BitmapImage source;
+    source.UriSource(wf::Uri(ToFileUri(path)));
+    wuxm::ImageBrush brush;
+    brush.ImageSource(source);
+    brush.Stretch(wuxm::Stretch::UniformToFill);
+    ellipse.Fill(brush);
+    element.Tag(winrt::box_value(pathTag));
+}
+
+void SetNamedOpacity(wux::UIElement const& root, PCWSTR name, double opacity) {
+    auto element = FindNamedFrameworkElement(root, name);
+    if (element) {
+        element.Opacity(opacity);
+    }
+}
+
+void SetNamedBorderVisual(wux::UIElement const& root,
+                          PCWSTR name,
+                          bool active) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto border = element ? element.try_as<wuxc::Border>() : nullptr;
+    if (!border) {
+        return;
+    }
+
+    border.BorderThickness(wux::ThicknessHelper::FromUniformLength(2));
+    border.BorderBrush(active ? MakeBrush(0xFF, 0x22, 0xC5, 0x5E)
+                              : MakeBrush(0x00, 0x00, 0x00, 0x00));
+}
+
+void SetNamedBorderImageBackground(wux::UIElement const& root,
+                                   PCWSTR name,
+                                   const std::wstring& path) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto border = element ? element.try_as<wuxc::Border>() : nullptr;
+    if (!border || path.empty() || !FileExists(path)) {
+        return;
+    }
+
+    unsigned long long version = GetFileWriteVersion(path);
+    std::wstring taggedPath =
+        path + L"#" + std::to_wstring(static_cast<unsigned long long>(version));
+    winrt::hstring pathTag(taggedPath);
+    winrt::hstring currentTag =
+        winrt::unbox_value_or<winrt::hstring>(element.Tag(), winrt::hstring{});
+    if (currentTag == pathTag) {
+        return;
+    }
+
+    wuxmi::BitmapImage source;
+    std::wstring uri = ToFileUri(path);
+    if (version != 0) {
+        uri += L"?v=" + std::to_wstring(version);
+    }
+    source.UriSource(wf::Uri(uri));
+    wuxm::ImageBrush brush;
+    brush.ImageSource(source);
+    brush.Stretch(wuxm::Stretch::UniformToFill);
+    border.Background(brush);
+    element.Tag(winrt::box_value(pathTag));
+}
+
+void SetNamedBorderFill(wux::UIElement const& root,
+                        PCWSTR name,
+                        wuxm::Brush const& brush) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto border = element ? element.try_as<wuxc::Border>() : nullptr;
+    if (border) {
+        border.Background(brush);
+    }
+}
+
+void SetNamedIconGlyph(wux::UIElement const& root, PCWSTR name, PCWSTR glyph) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto icon = element ? element.try_as<wuxc::FontIcon>() : nullptr;
+    if (icon) {
+        icon.Glyph(glyph);
+    }
+}
+
+void SetNamedIconColor(wux::UIElement const& root,
+                       PCWSTR name,
+                       winrt::Windows::UI::Color color) {
+    auto element = FindNamedFrameworkElement(root, name);
+    auto icon = element ? element.try_as<wuxc::FontIcon>() : nullptr;
+    if (icon) {
+        icon.Foreground(wuxm::SolidColorBrush(color));
+    }
+}
+
+int HexDigit(wchar_t value) {
+    if (value >= L'0' && value <= L'9') {
+        return value - L'0';
+    }
+    if (value >= L'a' && value <= L'f') {
+        return 10 + value - L'a';
+    }
+    if (value >= L'A' && value <= L'F') {
+        return 10 + value - L'A';
+    }
+    return -1;
+}
+
+bool ParseHexColor(const std::wstring& value,
+                   winrt::Windows::UI::Color& color) {
+    if (value.size() != 7 || value[0] != L'#') {
+        return false;
+    }
+
+    BYTE channels[3]{};
+    for (int i = 0; i < 3; ++i) {
+        int high = HexDigit(value[1 + i * 2]);
+        int low = HexDigit(value[2 + i * 2]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        channels[i] = static_cast<BYTE>((high << 4) | low);
+    }
+
+    color = winrt::Windows::UI::Color{
+        0xFF, channels[0], channels[1], channels[2]};
+    return true;
+}
+
+wuxm::Brush MakeMediaGradientBrush(const winrt::Windows::UI::Color& left,
+                                   const winrt::Windows::UI::Color& right) {
+    wuxm::LinearGradientBrush brush;
+    brush.StartPoint(wf::Point{0.0f, 0.5f});
+    brush.EndPoint(wf::Point{1.0f, 0.5f});
+
+    wuxm::GradientStop leftStop;
+    leftStop.Color(left);
+    leftStop.Offset(0.0);
+    brush.GradientStops().Append(leftStop);
+
+    wuxm::GradientStop rightStop;
+    rightStop.Color(right);
+    rightStop.Offset(1.0);
+    brush.GradientStops().Append(rightStop);
+    return brush;
+}
+
+void ApplyMediaTheme(wux::UIElement const& root,
+                     bool darkMode,
+                     bool active,
+                     const MediaSnapshot& media) {
+    if (darkMode) {
+        winrt::Windows::UI::Color left{0xFF, 0x0F, 0x17, 0x2A};
+        winrt::Windows::UI::Color right{0xFF, 0x11, 0x18, 0x27};
+        bool hasAdaptive =
+            ParseHexColor(media.backgroundLeftColor, left) &&
+            ParseHexColor(media.backgroundRightColor, right);
+        if (hasAdaptive) {
+            SetNamedBorderFill(root, L"TaskbarStatsMediaPanel",
+                               MakeMediaGradientBrush(left, right));
+        } else {
+            SetNamedBorderFill(root, L"TaskbarStatsMediaPanel",
+                               MakeBrush(0xFF, 0x0F, 0x17, 0x2A));
+        }
+
+        winrt::Windows::UI::Color accent{0xFF, 0x22, 0xD3, 0xEE};
+        ParseHexColor(media.accentColor, accent);
+        SetNamedTextColor(root, L"TaskbarStatsMediaTitle",
+                          winrt::Windows::UI::Color{0xFF, 0xF8, 0xFA, 0xFC});
+        SetNamedTextColor(root, L"TaskbarStatsMediaTitleClone",
+                          winrt::Windows::UI::Color{0xFF, 0xF8, 0xFA, 0xFC});
+        SetNamedTextColor(root, L"TaskbarStatsMediaArtist",
+                          winrt::Windows::UI::Color{0xFF, 0x94, 0xA3, 0xB8});
+        if (active) {
+            SetNamedBorderFill(root, L"TaskbarStatsMediaPlayButton",
+                               wuxm::SolidColorBrush(accent));
+        } else {
+            SetNamedBorderFill(root, L"TaskbarStatsMediaPlayButton",
+                               MakeBrush(0xFF, 0x33, 0x41, 0x55));
+        }
+        SetNamedIconColor(root, L"TaskbarStatsMediaPlayIcon",
+                          active ? winrt::Windows::UI::Color{0xFF, 0x08, 0x17, 0x1F}
+                                 : winrt::Windows::UI::Color{0xFF, 0xCB, 0xD5, 0xE1});
+        return;
+    }
+
+    SetNamedBorderFill(root, L"TaskbarStatsMediaPanel",
+                       MakeBrush(0xFF, 0xFA, 0xFA, 0xF8));
+    SetNamedTextColor(root, L"TaskbarStatsMediaTitle",
+                      winrt::Windows::UI::Color{0xFF, 0x00, 0x00, 0x00});
+    SetNamedTextColor(root, L"TaskbarStatsMediaTitleClone",
+                      winrt::Windows::UI::Color{0xFF, 0x00, 0x00, 0x00});
+    SetNamedTextColor(root, L"TaskbarStatsMediaArtist",
+                      winrt::Windows::UI::Color{0xF0, 0x00, 0x00, 0x00});
+    SetNamedBorderFill(root, L"TaskbarStatsMediaPlayButton",
+                       active ? MakeBrush(0xFF, 0x00, 0x00, 0x00)
+                              : MakeBrush(0x55, 0x00, 0x00, 0x00));
+    SetNamedIconColor(root, L"TaskbarStatsMediaPlayIcon",
+                      winrt::Windows::UI::Color{0xFF, 0xFF, 0xFF, 0xFF});
+}
+
+void SetDiscordPanelBackground(wux::UIElement const& root, bool enabled) {
+    auto element = FindNamedFrameworkElement(root, L"TaskbarStatsDiscordPanel");
+    auto border = element ? element.try_as<wuxc::Border>() : nullptr;
+    if (!border) {
+        return;
+    }
+
+    border.Background(enabled ? MakeBrush(0xF5, 0x11, 0x11, 0x11)
+                              : MakeBrush(0x00, 0x00, 0x00, 0x00));
+    border.BorderBrush(enabled ? MakeBrush(0xFF, 0x2D, 0x2D, 0x2D)
+                               : MakeBrush(0x00, 0x00, 0x00, 0x00));
+    border.BorderThickness(wux::ThicknessHelper::FromUniformLength(enabled ? 1 : 0));
 }
 
 void SetNamedVisibility(wux::UIElement const& root,
@@ -2757,18 +3775,39 @@ void UpdateExpandedTaskRows(wux::UIElement const& root,
     }
 }
 
+void ApplyWidgetOffset(wux::UIElement const& root,
+                       const WidgetRuntimeSettings& settings) {
+    double offset = static_cast<double>(
+        std::clamp(settings.widgetOffsetPx, 0LL, 480LL));
+    wuxm::TranslateTransform transform;
+    transform.X(-offset);
+    transform.Y(0);
+    root.RenderTransform(transform);
+}
+
 void SetExpandedMode(wux::UIElement const& root, bool expanded) {
-    if (ReadActiveWidgetDesign() != L"codex-status") {
+    std::wstring activeDesign = ReadActiveWidgetDesign();
+    if (activeDesign != L"codex-status") {
         auto rootElement = root.try_as<wux::FrameworkElement>();
         if (rootElement) {
-            rootElement.Width(240);
+            if (activeDesign == L"btc-fees") {
+                rootElement.Width(230);
+                rootElement.Height(44);
+            } else if (activeDesign == L"media-player") {
+                rootElement.Width(230);
+                rootElement.Height(44);
+            } else if (activeDesign == L"discord-voice") {
+                rootElement.Width(196);
+                rootElement.Height(36);
+            } else {
+                rootElement.Width(240);
+                rootElement.Height(36);
+            }
         }
         SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
                            wux::Visibility::Collapsed);
         SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
                            wux::Visibility::Collapsed);
-        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
-                           wux::Visibility::Visible);
         return;
     }
 
@@ -2779,6 +3818,7 @@ void SetExpandedMode(wux::UIElement const& root, bool expanded) {
     auto rootElement = root.try_as<wux::FrameworkElement>();
     if (rootElement) {
         rootElement.Width(184);
+        rootElement.Height(36);
     }
 
     SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
@@ -2790,12 +3830,118 @@ void SetExpandedMode(wux::UIElement const& root, bool expanded) {
 }
 
 void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
+    WidgetRuntimeSettings rootSettings = ReadWidgetRuntimeSettings();
+    ApplyWidgetOffset(root, rootSettings);
     std::wstring activeDesign = ReadActiveWidgetDesign();
+    if (activeDesign == L"btc-fees") {
+        auto rootElement = root.try_as<wux::FrameworkElement>();
+        if (rootElement) {
+            rootElement.Width(230);
+            rootElement.Height(44);
+        }
+
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsDiscordPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsMediaPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsBtcPanel",
+                           wux::Visibility::Visible);
+        return;
+    }
+
+    if (activeDesign == L"media-player") {
+        MediaSnapshot media = ReadMediaSnapshot();
+        WidgetRuntimeSettings settings = ReadWidgetRuntimeSettings();
+        auto rootElement = root.try_as<wux::FrameworkElement>();
+        if (rootElement) {
+            rootElement.Width(230);
+            rootElement.Height(44);
+        }
+
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsDiscordPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsBtcPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsMediaPanel",
+                           wux::Visibility::Visible);
+        bool hasMediaText = !Trim(media.title).empty() || !Trim(media.artist).empty();
+        SetMediaTitleText(root, hasMediaText
+                                    ? (media.title.empty() ? L"Unknown media" : media.title)
+                                    : L"No media");
+        SetNamedText(root, L"TaskbarStatsMediaArtist",
+                     hasMediaText
+                         ? (media.artist.empty() ? L"Unknown artist" : media.artist)
+                         : L"Open a player");
+        SetNamedIconGlyph(root, L"TaskbarStatsMediaPlayIcon",
+                          media.playing ? L"\xE769" : L"\xE768");
+        SetNamedOpacity(root, L"TaskbarStatsMediaPlayIcon", media.active ? 1.0 : 0.45);
+        ApplyMediaTheme(root, settings.mediaDarkMode,
+                        media.active || hasMediaText, media);
+        SetNamedBorderImageBackground(root, L"TaskbarStatsMediaCover",
+                                      media.coverPath);
+        return;
+    }
+
+    if (activeDesign == L"discord-voice") {
+        WidgetRuntimeSettings settings = ReadWidgetRuntimeSettings();
+        DiscordVoiceSnapshot discord = ReadDiscordVoiceSnapshot();
+        auto rootElement = root.try_as<wux::FrameworkElement>();
+        if (rootElement) {
+            rootElement.Width(196);
+            rootElement.Height(36);
+        }
+
+        SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsExpandedPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsBtcPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsMediaPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsDiscordPanel",
+                           wux::Visibility::Visible);
+        SetDiscordPanelBackground(root, settings.discordBackgroundEnabled);
+
+        for (int i = 0; i < 5; ++i) {
+            std::wstring frameName = L"TaskbarStatsDiscordAvatarFrame" + std::to_wstring(i);
+            std::wstring avatarName = L"TaskbarStatsDiscordAvatarEllipse" + std::to_wstring(i);
+            if (i < static_cast<int>(discord.users.size())) {
+                const auto& user = discord.users[i];
+                SetNamedVisibility(root, frameName.c_str(), wux::Visibility::Visible);
+                std::wstring avatarPath = user.speaking && !user.animatedAvatarPath.empty()
+                                              ? user.animatedAvatarPath
+                                              : user.avatarPath;
+                SetNamedEllipseImageFill(root, avatarName.c_str(), avatarPath);
+                SetNamedOpacity(root, avatarName.c_str(), user.speaking ? 1.0 : 0.38);
+                SetNamedBorderVisual(root, frameName.c_str(), user.speaking);
+            } else {
+                SetNamedVisibility(root, frameName.c_str(), wux::Visibility::Collapsed);
+            }
+        }
+        return;
+    }
+
     if (activeDesign == L"weather-static") {
         WeatherSnapshot weather = ReadWeatherSnapshot();
         auto rootElement = root.try_as<wux::FrameworkElement>();
         if (rootElement) {
             rootElement.Width(240);
+            rootElement.Height(36);
         }
 
         SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
@@ -2804,6 +3950,12 @@ void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
                            wux::Visibility::Collapsed);
         SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
                            wux::Visibility::Visible);
+        SetNamedVisibility(root, L"TaskbarStatsDiscordPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsBtcPanel",
+                           wux::Visibility::Collapsed);
+        SetNamedVisibility(root, L"TaskbarStatsMediaPanel",
+                           wux::Visibility::Collapsed);
 
         if (!weather.loaded) {
             SetNamedText(root, L"TaskbarStatsWeatherCity", L"Izmir");
@@ -2825,6 +3977,12 @@ void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
     }
 
     SetNamedVisibility(root, L"TaskbarStatsWeatherPanel",
+                       wux::Visibility::Collapsed);
+    SetNamedVisibility(root, L"TaskbarStatsDiscordPanel",
+                       wux::Visibility::Collapsed);
+    SetNamedVisibility(root, L"TaskbarStatsBtcPanel",
+                       wux::Visibility::Collapsed);
+    SetNamedVisibility(root, L"TaskbarStatsMediaPanel",
                        wux::Visibility::Collapsed);
     SetNamedVisibility(root, L"TaskbarStatsCompactPanel",
                        wux::Visibility::Visible);
@@ -2874,6 +4032,11 @@ void UpdateTaskbarStatsRoot(wux::UIElement const& root) {
 void RefreshInsertedTaskbarStatsRoots() {
     for (auto const& module : g_insertedModules) {
         if (module.root) {
+            auto rootElement = module.root.try_as<wux::FrameworkElement>();
+            if (rootElement && module.parent && module.trayElement) {
+                ApplyTaskbarStatsAnchorMargin(rootElement, module.parent,
+                                              module.trayElement);
+            }
             UpdateTaskbarStatsRoot(module.root);
         }
     }
@@ -2881,7 +4044,7 @@ void RefreshInsertedTaskbarStatsRoots() {
 
 wux::DispatcherTimer StartTaskbarStatsTimer(wux::UIElement const& root) {
     wux::DispatcherTimer timer;
-    timer.Interval(std::chrono::seconds(1));
+    timer.Interval(std::chrono::milliseconds(33));
     timer.Tick([root](auto const&, auto const&) {
         try {
             UpdateTaskbarStatsRoot(root);
@@ -2915,7 +4078,7 @@ bool FindTaskbarStatsChild(wuxc::Grid const& parent,
 }
 
 bool HasCurrentTaskbarStatsChild(wux::UIElement const& root) {
-    return FindNamedFrameworkElement(root, L"TaskbarStatsLimitBarFill") != nullptr;
+    return FindNamedFrameworkElement(root, kTaskbarStatsLayoutMarkerName) != nullptr;
 }
 
 bool HasTaskbarStatsChild(wuxc::Grid const& parent) {
@@ -2987,6 +4150,56 @@ void CleanupInsertedModuleForAnchor(InstanceHandle handle) {
     g_insertedModules.erase(it, g_insertedModules.end());
 }
 
+double GetOverlayRightReserve(wuxc::Grid const& parent,
+                              wux::FrameworkElement const& trayElement) {
+    double trayWidth = trayElement.ActualWidth();
+    if (trayWidth < 120.0) {
+        trayWidth = 190.0;
+    }
+
+    double rightReserve =
+        std::max(kTaskbarStatsOverlayMinRightReserve,
+                 trayWidth + kTaskbarStatsOverlayTrayGap);
+
+    double parentWidth = parent.ActualWidth();
+    if (parentWidth > 320.0) {
+        double maxReserve = parentWidth - kTaskbarStatsMaxWidgetWidth - 20.0;
+        if (maxReserve > 24.0) {
+            rightReserve = std::min(rightReserve, maxReserve);
+        }
+    }
+
+    return rightReserve;
+}
+
+void ApplyTaskbarStatsAnchorMargin(wux::FrameworkElement const& root,
+                                   wuxc::Grid const& parent,
+                                   wux::FrameworkElement const& trayElement) {
+    if (parent.ColumnDefinitions().Size() == 0) {
+        double rightReserve = GetOverlayRightReserve(parent, trayElement);
+        auto current = root.Margin();
+        if (std::fabs(current.Left) > 0.5 ||
+            std::fabs(current.Top) > 0.5 ||
+            std::fabs(current.Right - rightReserve) > 0.5 ||
+            std::fabs(current.Bottom) > 0.5) {
+            root.Margin(
+                wux::ThicknessHelper::FromLengths(0, 0, rightReserve, 0));
+            Wh_Log(L"Right-aligning TaskbarStatsRoot with reserved tray area %.1f",
+                   rightReserve);
+        }
+        return;
+    }
+
+    auto current = root.Margin();
+    if (std::fabs(current.Left - 6.0) > 0.5 ||
+        std::fabs(current.Top) > 0.5 ||
+        std::fabs(current.Right - kTaskbarStatsExplicitColumnRightGap) > 0.5 ||
+        std::fabs(current.Bottom) > 0.5) {
+        root.Margin(wux::ThicknessHelper::FromLengths(
+            6, 0, kTaskbarStatsExplicitColumnRightGap, 0));
+    }
+}
+
 bool TryInsertNextToSystemTray(InstanceHandle handle,
                                wux::FrameworkElement const& element,
                                PCWSTR typeName) {
@@ -3015,8 +4228,8 @@ bool TryInsertNextToSystemTray(InstanceHandle handle,
                                   wuxc::Grid::GetColumn(existingElement));
             wuxc::Grid::SetRow(replacementRoot,
                                wuxc::Grid::GetRow(existingElement));
-            replacementRoot.Margin(existingElement.Margin());
         }
+        ApplyTaskbarStatsAnchorMargin(replacementRoot, parent, element);
 
         wuxc::Canvas::SetZIndex(replacementRoot, 10000);
 
@@ -3028,6 +4241,7 @@ bool TryInsertNextToSystemTray(InstanceHandle handle,
         g_insertedModules.push_back(InsertedModule{
             .anchorHandle = handle,
             .parent = parent,
+            .trayElement = element,
             .root = replacementRoot.as<wux::UIElement>(),
             .timer = timer,
             .insertedColumn = existingElement
@@ -3092,16 +4306,7 @@ bool TryInsertNextToSystemTray(InstanceHandle handle,
     }
 
     auto root = MakeTaskbarStatsRoot();
-    if (columnCount == 0) {
-        double trayWidth = element.ActualWidth();
-        if (trayWidth < 48) {
-            trayWidth = 190;
-        }
-
-        root.Margin(wux::ThicknessHelper::FromLengths(0, 0, trayWidth + 12, 0));
-        Wh_Log(L"Right-aligning TaskbarStatsRoot with tray width %.1f",
-               trayWidth);
-    }
+    ApplyTaskbarStatsAnchorMargin(root, parent, element);
 
     // Prefer a real auto-width taskbar grid slot before the system tray when
     // explicit columns exist. Otherwise use right alignment with tray margin,
@@ -3116,6 +4321,7 @@ bool TryInsertNextToSystemTray(InstanceHandle handle,
     g_insertedModules.push_back(InsertedModule{
         .anchorHandle = handle,
         .parent = parent,
+        .trayElement = element,
         .root = root.as<wux::UIElement>(),
         .timer = timer,
         .insertedColumn = targetColumn,
