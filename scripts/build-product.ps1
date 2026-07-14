@@ -35,8 +35,12 @@ $WindhawkCompiler = "C:\Program Files\Windhawk\Compiler\bin\clang++.exe"
 $Compiler = $env:TASKBARSTATS_CLANGXX
 $UseWindhawkArgs = $false
 if ($Compiler) {
-    $UseWindhawkArgs = (Resolve-Path $Compiler -ErrorAction SilentlyContinue) -eq
-        (Resolve-Path $WindhawkCompiler -ErrorAction SilentlyContinue)
+    $ResolvedCompiler = (Resolve-Path $Compiler -ErrorAction SilentlyContinue).Path
+    $ResolvedWindhawkCompiler = (Resolve-Path $WindhawkCompiler -ErrorAction SilentlyContinue).Path
+    $UseWindhawkArgs =
+        $ResolvedCompiler -and
+        $ResolvedWindhawkCompiler -and
+        $ResolvedCompiler.Equals($ResolvedWindhawkCompiler, [StringComparison]::OrdinalIgnoreCase)
 } elseif (Test-Path $WindhawkCompiler) {
     $Compiler = $WindhawkCompiler
     $UseWindhawkArgs = $true
