@@ -119,8 +119,6 @@ void TestUpdaterAssetSelection()
     ]);
     Assert(partial is null, "partial product selected as updater");
     var full = ReleaseAssetPolicy.Select([
-        ("TaskbarStatsSetup.exe", "legacy-setup"),
-        ("TaskbarStatsSetup.exe.sha256", "legacy-sha"),
         (ReleaseAssetPolicy.SetupSha256Name, "sha"),
         (ReleaseAssetPolicy.SetupName, "setup")
     ]);

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http;
@@ -13,7 +14,8 @@ namespace TaskbarWidgets.Loader;
 
 internal static class SteamDownloadWorker
 {
-    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan HeaderRetryInterval = TimeSpan.FromMinutes(5);
     private static readonly string AppDirectory = AppPaths.AppDirectory;
     private static readonly string LogsDirectory = Path.Combine(AppDirectory, "Logs");
     private static readonly string LogPath = Path.Combine(LogsDirectory, "loader.log");
@@ -21,8 +23,10 @@ internal static class SteamDownloadWorker
     private static readonly WidgetStateStore StateStore = new();
     private static readonly HttpClient Http = new()
     {
-        Timeout = TimeSpan.FromSeconds(10)
+        Timeout = TimeSpan.FromSeconds(3)
     };
+    private static readonly ConcurrentDictionary<string, byte> ActiveHeaderDownloads = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, DateTimeOffset> HeaderRetryAfter = new(StringComparer.Ordinal);
 
     private static readonly Regex PairRegex = new("\"([^\"]+)\"\\s+\"([^\"]*)\"", RegexOptions.Compiled);
     private static readonly Regex PathRegex = new("\"path\"\\s+\"([^\"]+)\"", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -42,7 +46,7 @@ internal static class SteamDownloadWorker
         {
             try
             {
-                var snapshot = await BuildSnapshotAsync(previousBytes, cancellationToken);
+                var snapshot = BuildSnapshot(previousBytes, cancellationToken);
                 WriteStatus(snapshot);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -59,7 +63,7 @@ internal static class SteamDownloadWorker
         }
     }
 
-    private static async Task<SteamDownloadSnapshot> BuildSnapshotAsync(
+    private static SteamDownloadSnapshot BuildSnapshot(
         Dictionary<string, (long bytes, DateTimeOffset at)> previousBytes,
         CancellationToken cancellationToken)
     {
@@ -115,7 +119,8 @@ internal static class SteamDownloadWorker
         var progress = total > 0
             ? Math.Clamp(downloaded * 100.0 / total, 0, 100)
             : 0;
-        var coverPath = await EnsureHeaderImageAsync(item.AppId, cancellationToken);
+        var coverPath = HeaderImagePath(item.AppId);
+        QueueHeaderImageDownload(item.AppId, cancellationToken);
         var status = speed > 0 ? "downloading" : "paused_or_queued";
         var statusText = speed > 0 ? "Downloading" : "Queued";
         var speedText = speed > 0 ? $"{BytesToMegabytes(speed):0.0} MB/s" : "0 MB/s";
@@ -338,33 +343,80 @@ internal static class SteamDownloadWorker
         return newest.Value.bytesPerSecond;
     }
 
-    private static async Task<string> EnsureHeaderImageAsync(string appId, CancellationToken cancellationToken)
+    private static string HeaderImagePath(string appId)
     {
         var path = Path.Combine(WidgetAssetsDirectory, $"steam_header_{SanitizeFileName(appId)}.jpg");
-        if (File.Exists(path) && new FileInfo(path).Length > 4096)
+        return File.Exists(path) && new FileInfo(path).Length > 4096 ? path : "";
+    }
+
+    private static void QueueHeaderImageDownload(string appId, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrEmpty(HeaderImagePath(appId)))
         {
-            return path;
+            HeaderRetryAfter.TryRemove(appId, out _);
+            return;
         }
 
+        var now = DateTimeOffset.UtcNow;
+        if (HeaderRetryAfter.TryGetValue(appId, out var retryAfter) && retryAfter > now)
+        {
+            return;
+        }
+
+        if (!ActiveHeaderDownloads.TryAdd(appId, 0))
+        {
+            return;
+        }
+
+        _ = DownloadHeaderImageAsync(appId, cancellationToken);
+    }
+
+    private static async Task DownloadHeaderImageAsync(string appId, CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(WidgetAssetsDirectory, $"steam_header_{SanitizeFileName(appId)}.jpg");
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
         var url = $"https://cdn.akamai.steamstatic.com/steam/apps/{appId}/header.jpg";
+        var cached = false;
         try
         {
             var bytes = await Http.GetByteArrayAsync(url, cancellationToken);
             if (bytes.Length > 4096)
             {
-                await File.WriteAllBytesAsync(path, bytes, cancellationToken);
+                await File.WriteAllBytesAsync(tempPath, bytes, cancellationToken);
+                File.Move(tempPath, path, overwrite: true);
+                cached = true;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            // The loader is shutting down; no retry is needed.
         }
         catch (Exception ex)
         {
             Log($"Steam header download failed for {appId}: {ex.Message}");
         }
+        finally
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // A stale temporary image must not affect the provider.
+            }
 
-        return File.Exists(path) ? path : "";
+            if (cached)
+            {
+                HeaderRetryAfter.TryRemove(appId, out _);
+            }
+            else if (!cancellationToken.IsCancellationRequested)
+            {
+                HeaderRetryAfter[appId] = DateTimeOffset.UtcNow + HeaderRetryInterval;
+            }
+
+            ActiveHeaderDownloads.TryRemove(appId, out _);
+        }
     }
 
     private static string SanitizeFileName(string value)

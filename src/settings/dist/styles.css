@@ -669,6 +669,7 @@ button {
   border: 1px solid rgba(255, 255, 255, .07);
   border-radius: 12px;
   background: rgba(26, 27, 33, .62);
+  cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease;
 }
 
@@ -679,6 +680,11 @@ button {
 
 .widget-library-row.enabled {
   border-color: color-mix(in srgb, var(--accent) 38%, rgba(255, 255, 255, .08));
+}
+
+.widget-library-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .native-preview-button {

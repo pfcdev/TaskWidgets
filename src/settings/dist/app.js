@@ -323,8 +323,8 @@ function widgetLibraryRow(widget) {
   const runtime = widgetRuntime(widget.id);
   const enabled = isWidgetEnabled(widget.id);
   return `
-    <article class="widget-library-row ${enabled ? "enabled" : ""}" style="--accent:${widget.accent}">
-      <button class="native-preview-button" data-open-widget="${widget.id}" type="button" aria-label="Open ${escapeAttr(widget.title)} settings">
+    <article class="widget-library-row ${enabled ? "enabled" : ""}" style="--accent:${widget.accent}" data-open-widget="${widget.id}" role="button" tabindex="0" aria-label="Open ${escapeAttr(widget.title)} settings">
+      <button class="native-preview-button" type="button" aria-label="Open ${escapeAttr(widget.title)} settings">
         ${runtime.preview}
       </button>
       <div class="widget-library-copy">
@@ -509,7 +509,7 @@ function updatesPage() {
   const busy = isUpdateBusy(update);
   const downloading = update.state === "downloading";
   const installing = update.state === "installing" || updateInstallerLaunchInProgress;
-  const current = update.currentVersion || "0.3.4";
+  const current = update.currentVersion || "0.3.5";
   const latest = update.latestVersion || "Not checked";
   const checked = update.updatedAtUnix ? formatUnixTime(update.updatedAtUnix) : "Not checked";
   const isCurrent = update.state === "current" || (latest !== "Not checked" && latest.replace(/^v/i, "") === current.replace(/\.0$/, ""));
@@ -903,6 +903,13 @@ function bindWidgetButtons() {
   });
   document.querySelectorAll("[data-open-widget]").forEach((element) => {
     element.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openWidgetModal(element.dataset.openWidget);
+    };
+    element.onkeydown = (event) => {
+      if (event.target !== element) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       event.stopPropagation();
       openWidgetModal(element.dataset.openWidget);

@@ -22,8 +22,6 @@ $ArtifactDir = Join-Path $RepoRoot "artifacts"
 $Files = @(
     (Join-Path $ArtifactDir "TaskbarWidgetsSetup-x64.exe"),
     (Join-Path $ArtifactDir "TaskbarWidgetsSetup-x64.exe.sha256"),
-    (Join-Path $ArtifactDir "TaskbarStatsSetup.exe"),
-    (Join-Path $ArtifactDir "TaskbarStatsSetup.exe.sha256"),
     (Join-Path $ArtifactDir "TaskbarWidgets-portable-x64.zip"),
     (Join-Path $ArtifactDir "TaskbarWidgets-portable-x64.zip.sha256"),
     (Join-Path $ArtifactDir "release-manifest.json")
@@ -32,7 +30,7 @@ foreach ($file in $Files) { if (-not (Test-Path $file)) { throw "Release artifac
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "GitHub CLI is required to publish a release." }
 
 $unsigned = -not [bool]$env:WINDOWS_SIGNING_CERT_BASE64
-$notes = "Taskbar Widgets $Tag for Windows 11 x64. Existing TaskbarStats 0.2.7 installations can update through the TaskbarStatsSetup.exe compatibility asset; user data is migrated to Taskbar Widgets and retained at the legacy location."
+$notes = "Taskbar Widgets $Tag for Windows 11 x64. TaskbarWidgetsSetup-x64.exe is the single installer for installation and updates; existing user data is migrated and preserved."
 if ($unsigned) { $notes += " This build is unsigned and Windows SmartScreen may show a warning." }
 
 gh release view $Tag --repo $Repo *> $null

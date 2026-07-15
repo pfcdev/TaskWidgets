@@ -3937,9 +3937,17 @@ void SetNamedImageSource(wux::UIElement const& root,
         return;
     }
 
+    winrt::hstring pathTag(assetPath);
+    winrt::hstring currentTag =
+        winrt::unbox_value_or<winrt::hstring>(element.Tag(), winrt::hstring{});
+    if (currentTag == pathTag) {
+        return;
+    }
+
     wuxmi::BitmapImage source;
     source.UriSource(wf::Uri(ToFileUri(assetPath)));
     image.Source(source);
+    element.Tag(winrt::box_value(pathTag));
 }
 
 void SetNamedImageFileSource(wux::UIElement const& root,
@@ -3951,9 +3959,24 @@ void SetNamedImageFileSource(wux::UIElement const& root,
         return;
     }
 
+    unsigned long long version = GetFileWriteVersion(path);
+    std::wstring taggedPath =
+        path + L"#" + std::to_wstring(static_cast<unsigned long long>(version));
+    winrt::hstring pathTag(taggedPath);
+    winrt::hstring currentTag =
+        winrt::unbox_value_or<winrt::hstring>(element.Tag(), winrt::hstring{});
+    if (currentTag == pathTag) {
+        return;
+    }
+
     wuxmi::BitmapImage source;
-    source.UriSource(wf::Uri(ToFileUri(path)));
+    std::wstring uri = ToFileUri(path);
+    if (version != 0) {
+        uri += L"?v=" + std::to_wstring(version);
+    }
+    source.UriSource(wf::Uri(uri));
     image.Source(source);
+    element.Tag(winrt::box_value(pathTag));
 }
 
 void SetNamedEllipseImageFill(wux::UIElement const& root,
