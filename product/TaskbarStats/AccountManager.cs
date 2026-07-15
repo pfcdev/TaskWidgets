@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -33,6 +34,8 @@ internal static class AccountManager
     private static readonly string RealCodexHome = Path.Combine(UserProfile, ".codex");
     private static readonly string MaterializedAccountPath =
         Path.Combine(AppDirectory, "active-codex-account.txt");
+    private const int SwRestore = 9;
+    private const int SwShow = 5;
 
     public static void Initialize()
     {
@@ -292,9 +295,11 @@ internal static class AccountManager
             return;
         }
 
-        if (IsSettingsAppAlreadyRunning())
+        using Process? runningSettings = FindRunningSettingsApp();
+        if (runningSettings is not null)
         {
             Log($"Settings app is already running: {SettingsAppPath}");
+            BringSettingsProcessToFront(runningSettings);
             return;
         }
 
@@ -307,31 +312,59 @@ internal static class AccountManager
         Log($"Opened settings app: {SettingsAppPath}");
     }
 
-    private static bool IsSettingsAppAlreadyRunning()
+    private static Process? FindRunningSettingsApp()
     {
         string expectedPath = Path.GetFullPath(SettingsAppPath);
         foreach (Process process in Process.GetProcessesByName("TaskbarStatsSettings"))
         {
-            using (process)
+            try
             {
-                try
+                string? path = process.MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(path) &&
+                    string.Equals(Path.GetFullPath(path), expectedPath,
+                        StringComparison.OrdinalIgnoreCase))
                 {
-                    string? path = process.MainModule?.FileName;
-                    if (!string.IsNullOrWhiteSpace(path) &&
-                        string.Equals(Path.GetFullPath(path), expectedPath,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-                }
-                catch
-                {
-                    // Some processes can deny module path access. Ignore them.
+                    return process;
                 }
             }
+            catch
+            {
+                // Some processes can deny module path access. Ignore them.
+            }
+
+            process.Dispose();
         }
 
-        return false;
+        return null;
+    }
+
+    private static void BringSettingsProcessToFront(Process process)
+    {
+        try
+        {
+            process.Refresh();
+            IntPtr handle = process.MainWindowHandle;
+            if (handle == IntPtr.Zero)
+            {
+                process.WaitForInputIdle(1000);
+                process.Refresh();
+                handle = process.MainWindowHandle;
+            }
+
+            if (handle == IntPtr.Zero)
+            {
+                Log($"Settings app is running but no main window handle was found: pid={process.Id}");
+                return;
+            }
+
+            ShowWindow(handle, IsIconic(handle) ? SwRestore : SwShow);
+            SetForegroundWindow(handle);
+            Log($"Brought settings app to foreground: pid={process.Id}");
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to bring settings app to foreground: {ex.Message}");
+        }
     }
 
     private static void QuitTaskbarStats()
@@ -1421,6 +1454,15 @@ internal static class AccountManager
             // Logging must never break account handling.
         }
     }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 
     private sealed class AccountSettings
     {
