@@ -4478,7 +4478,8 @@ void UpdateTaskbarWidgetsWidgetRoot(wux::UIElement const& root,
         rootElement.Tag(winrt::box_value(winrt::hstring(instance.designId)));
     }
 
-    std::wstring activeDesign = instance.designId;`r`n    if (activeDesign == L"media-player") {
+    std::wstring activeDesign = instance.designId;
+    if (activeDesign == L"media-player") {
         MediaSnapshot media = ReadMediaSnapshot();
         WidgetRuntimeSettings settings = ReadWidgetRuntimeSettings();
         auto rootElement = root.try_as<wux::FrameworkElement>();
