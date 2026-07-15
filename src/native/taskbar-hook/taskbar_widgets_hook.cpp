@@ -6021,43 +6021,98 @@ std::wstring GetShutdownEventName() {
     return name;
 }
 
-DWORD WINAPI TaskbarWidgetsShutdownThread(LPVOID) {
-    std::wstring eventName = GetShutdownEventName();
-    HANDLE event = CreateEvent(nullptr, TRUE, FALSE, eventName.c_str());
-    if (!event) {
-        Wh_Log(L"CreateEvent failed for shutdown event: %u", GetLastError());
-        return 0;
-    }
-
-    Wh_Log(L"Shutdown event ready: %s", eventName.c_str());
-    WaitForSingleObject(event, INFINITE);
-    CloseHandle(event);
-
-    Wh_Log(L"Shutdown event signaled");
-    Wh_ModUninit();
-    if (g_hookModule) {
-        FreeLibraryAndExitThread(g_hookModule, 0);
-    }
-
-    return 0;
+std::wstring GetLoadEventName() {
+    WCHAR name[128]{};
+    swprintf_s(name, L"Local\\TaskbarWidgetsHookLoad_%u", GetCurrentProcessId());
+    return name;
 }
 
-DWORD WINAPI TaskbarWidgetsBootstrapThread(LPVOID) {
-    Wh_ModInit();
-    Wh_ModAfterInit();
-
-    HANDLE shutdownThread = CreateThread(nullptr, 0, TaskbarWidgetsShutdownThread,
-                                         nullptr, 0, nullptr);
-    if (shutdownThread) {
-        CloseHandle(shutdownThread);
-    }
-
+DWORD WINAPI TaskbarWidgetsRuntimeThread(LPVOID) {
     while (!g_uninitializing) {
         InitializeExistingTaskbarThreads();
         InitializeTapOnce();
         Sleep(5000);
     }
 
+    return 0;
+}
+
+HANDLE StartTaskbarWidgetsRuntime() {
+    Wh_ModInit();
+    Wh_ModAfterInit();
+
+    HANDLE runtimeThread =
+        CreateThread(nullptr, 0, TaskbarWidgetsRuntimeThread, nullptr, 0, nullptr);
+    if (!runtimeThread) {
+        Wh_Log(L"Failed to create runtime maintenance thread: %u", GetLastError());
+    }
+    return runtimeThread;
+}
+
+DWORD WINAPI TaskbarWidgetsControlThread(LPVOID) {
+    std::wstring shutdownEventName = GetShutdownEventName();
+    std::wstring loadEventName = GetLoadEventName();
+    HANDLE shutdownEvent =
+        CreateEvent(nullptr, TRUE, FALSE, shutdownEventName.c_str());
+    HANDLE loadEvent = CreateEvent(nullptr, FALSE, FALSE, loadEventName.c_str());
+
+    HANDLE runtimeThread = StartTaskbarWidgetsRuntime();
+    bool runtimeActive = true;
+
+    if (!shutdownEvent || !loadEvent) {
+        Wh_Log(L"Failed to create runtime control events: %u", GetLastError());
+        if (shutdownEvent) {
+            CloseHandle(shutdownEvent);
+        }
+        if (loadEvent) {
+            CloseHandle(loadEvent);
+        }
+        if (runtimeThread) {
+            CloseHandle(runtimeThread);
+        }
+        return 0;
+    }
+
+    Wh_Log(L"Runtime control events ready: %s ; %s", shutdownEventName.c_str(),
+           loadEventName.c_str());
+
+    HANDLE events[] = {shutdownEvent, loadEvent};
+    for (;;) {
+        DWORD result = WaitForMultipleObjects(ARRAYSIZE(events), events, FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0) {
+            ResetEvent(shutdownEvent);
+            if (!runtimeActive) {
+                continue;
+            }
+
+            Wh_Log(L"Runtime unload event signaled");
+            Wh_ModUninit();
+            if (runtimeThread) {
+                WaitForSingleObject(runtimeThread, 7000);
+                CloseHandle(runtimeThread);
+                runtimeThread = nullptr;
+            }
+            runtimeActive = false;
+            Wh_Log(L"Runtime unloaded; hook module remains ready for Load");
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            if (runtimeActive) {
+                continue;
+            }
+
+            Wh_Log(L"Runtime load event signaled");
+            runtimeThread = StartTaskbarWidgetsRuntime();
+            runtimeActive = true;
+        } else {
+            Wh_Log(L"Runtime control wait failed: %u", GetLastError());
+            break;
+        }
+    }
+
+    if (runtimeThread) {
+        CloseHandle(runtimeThread);
+    }
+    CloseHandle(loadEvent);
+    CloseHandle(shutdownEvent);
     return 0;
 }
 
@@ -6069,7 +6124,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_hookModule = reinterpret_cast<HMODULE>(instance);
         DisableThreadLibraryCalls(instance);
-        HANDLE thread = CreateThread(nullptr, 0, TaskbarWidgetsBootstrapThread,
+        HANDLE thread = CreateThread(nullptr, 0, TaskbarWidgetsControlThread,
                                      nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);

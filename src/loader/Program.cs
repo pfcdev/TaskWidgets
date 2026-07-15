@@ -217,6 +217,10 @@ internal static class Program
                         {
                             InjectHook(process, hookPath);
                         }
+                        else
+                        {
+                            SignalHookLoad(process.Id);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -506,8 +510,30 @@ internal static class Program
         }
     }
 
+    private static bool SignalHookLoad(int processId)
+    {
+        var eventName = GetLoadEventName(processId);
+        var handle = OpenEvent(EventAccess.ModifyState, false, eventName);
+        if (handle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            return SetEvent(handle);
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
     private static string GetShutdownEventName(int processId) =>
         $@"Local\TaskbarWidgetsHookShutdown_{processId}";
+
+    private static string GetLoadEventName(int processId) =>
+        $@"Local\TaskbarWidgetsHookLoad_{processId}";
 
     private static IntPtr GetRemoteKernel32ProcAddress(Process process, string procName)
     {
