@@ -3951,7 +3951,6 @@ void SetMediaTitleText(wux::UIElement const& root, const std::wstring& text) {
     constexpr double viewportWidth = 112.0;
     constexpr double averageCharWidth = 6.2;
     constexpr double separatorWidth = 18.0;
-    constexpr double pixelsPerSecond = 18.0;
     const std::wstring separator = L"  •";
 
     double textWidth = static_cast<double>(value.size()) * averageCharWidth;
@@ -3984,17 +3983,6 @@ void SetMediaTitleText(wux::UIElement const& root, const std::wstring& text) {
     }
     first.Width(itemWidth);
     second.Width(itemWidth);
-
-    auto transform =
-        marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
-    if (!transform) {
-        transform = wuxm::TranslateTransform();
-        marqueeElement.RenderTransform(transform);
-    }
-
-    double elapsed = static_cast<double>(CurrentUnixMillis() % 600000LL) / 1000.0;
-    double offset = std::fmod(elapsed * pixelsPerSecond, itemWidth);
-    transform.X(-offset);
 }
 
 void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
@@ -4014,7 +4002,6 @@ void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
     constexpr double viewportWidth = 93.0;
     constexpr double averageCharWidth = 6.2;
     constexpr double separatorWidth = 18.0;
-    constexpr double pixelsPerSecond = 18.0;
     const std::wstring separator = L"  •";
 
     double textWidth = static_cast<double>(value.size()) * averageCharWidth;
@@ -4047,17 +4034,6 @@ void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
     }
     first.Width(itemWidth);
     second.Width(itemWidth);
-
-    auto transform =
-        marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
-    if (!transform) {
-        transform = wuxm::TranslateTransform();
-        marqueeElement.RenderTransform(transform);
-    }
-
-    double elapsed = static_cast<double>(CurrentUnixMillis() % 600000LL) / 1000.0;
-    double offset = std::fmod(elapsed * pixelsPerSecond, itemWidth);
-    transform.X(-offset);
 }
 
 void UpdateScrollingTitleAnimation(wux::FrameworkElement const& marqueeElement,
