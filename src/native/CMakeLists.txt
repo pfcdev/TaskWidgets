@@ -11,7 +11,7 @@ set_target_properties(TaskbarWidgetsHook PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED YES)
 target_compile_definitions(TaskbarWidgetsHook PRIVATE
-    UNICODE _UNICODE NOMINMAX _OLE32_ WINVER=0x0A00 _WIN32_WINNT=0x0A00 _WIN32_IE=0x0A00)
+    UNICODE _UNICODE NOMINMAX WINVER=0x0A00 _WIN32_WINNT=0x0A00 _WIN32_IE=0x0A00)
 target_link_libraries(TaskbarWidgetsHook PRIVATE ole32 oleaut32 runtimeobject gdi32 gdiplus)
 
 add_executable(TaskbarWidgetsMediaHelper WIN32 media-helper/media_helper.cpp)

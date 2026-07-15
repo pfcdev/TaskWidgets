@@ -1,11 +1,18 @@
 // Taskbar Widgets Explorer hook. This DLL is injected only by TaskbarWidgets.exe.
 // It uses private Windows 11 XAML surfaces and must always fail closed.
 
+// Windows SDK declares these COM server exports as imported functions. Rename
+// only those declarations while headers are parsed so this DLL can provide its
+// own exported implementations below.
+#define DllGetClassObject TaskbarWidgetsSdkDllGetClassObject
+#define DllCanUnloadNow TaskbarWidgetsSdkDllCanUnloadNow
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <ocidl.h>
 #include <xamlom.h>
+#undef DllGetClassObject
+#undef DllCanUnloadNow
 
 #ifdef GetCurrentTime
 #undef GetCurrentTime
