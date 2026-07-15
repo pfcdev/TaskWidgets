@@ -17,6 +17,8 @@
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Storage.Streams.h>
 
+#include "../common/json_string.h"
+
 namespace wf = winrt::Windows::Foundation;
 namespace wmc = winrt::Windows::Media::Control;
 namespace wss = winrt::Windows::Storage::Streams;
@@ -646,49 +648,12 @@ std::wstring Utf8ToWide(const std::string& value) {
 }
 
 bool ExtractJsonString(const std::string& json, const char* key, std::wstring& value) {
-    std::string pattern = std::string("\"") + key + "\":";
-    size_t position = json.find(pattern);
-    if (position == std::string::npos) {
+    std::string decoded;
+    if (!taskbar_widgets::json::ExtractStringUtf8(json, key, decoded)) {
         return false;
     }
-
-    position = json.find('"', position + pattern.size());
-    if (position == std::string::npos) {
-        return false;
-    }
-
-    std::string raw;
-    for (size_t i = position + 1; i < json.size(); ++i) {
-        char ch = json[i];
-        if (ch == '"') {
-            value = Utf8ToWide(raw);
-            return true;
-        }
-        if (ch == '\\' && i + 1 < json.size()) {
-            char next = json[++i];
-            switch (next) {
-                case '"':
-                case '\\':
-                    raw.push_back(next);
-                    break;
-                case 'n':
-                    raw.push_back('\n');
-                    break;
-                case 'r':
-                    raw.push_back('\r');
-                    break;
-                case 't':
-                    raw.push_back('\t');
-                    break;
-                default:
-                    break;
-            }
-        } else {
-            raw.push_back(ch);
-        }
-    }
-
-    return false;
+    value = Utf8ToWide(decoded);
+    return true;
 }
 
 bool ExtractJsonBool(const std::string& json, const char* key, bool& value) {

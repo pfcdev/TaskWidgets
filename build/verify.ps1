@@ -24,7 +24,11 @@ if ($LASTEXITCODE -ne 0) { throw "Native build failed." }
 & $cmake --build $nativeBuild --target RUN_TESTS --config $Configuration
 if ($LASTEXITCODE -ne 0) { throw "Native tests failed." }
 
-$cargoTarget = Join-Path ([IO.Path]::GetTempPath()) "taskbarwidgets-cargo-check"
+$cargoTarget = if ($env:TASKBARWIDGETS_TAURI_TARGET_DIR) {
+    $env:TASKBARWIDGETS_TAURI_TARGET_DIR
+} else {
+    Join-Path ([IO.Path]::GetTempPath()) "taskbarwidgets-cargo-check"
+}
 cargo check --manifest-path (Join-Path $RepoRoot "src\settings\src-tauri\Cargo.toml") --target-dir $cargoTarget
 if ($LASTEXITCODE -ne 0) { throw "Settings check failed." }
 

@@ -21,6 +21,29 @@ jobs:
           dotnet-version: "8.0.x"
       - name: Setup Rust
         run: rustup default stable
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-v2-${{ hashFiles('src/**/*.csproj', 'tests/**/*.csproj', 'Directory.Packages.props', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-v2-
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-home-v2-${{ hashFiles('src/settings/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-home-v2-
+      - name: Cache Settings verification build
+        uses: actions/cache@v4
+        with:
+          path: .cache/tauri-target
+          key: ${{ runner.os }}-tauri-verify-v2-${{ hashFiles('src/settings/src-tauri/Cargo.lock', 'src/settings/src-tauri/Cargo.toml', 'src/settings/src-tauri/src/**/*.rs', 'src/settings/dist/**') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-verify-v2-
       - name: Verify clean build and contracts
         shell: pwsh
         run: .\build.ps1 -Target Verify -Configuration Release

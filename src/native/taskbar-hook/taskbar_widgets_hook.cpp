@@ -41,6 +41,7 @@
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 
 #include "generated/widget_catalog.g.h"
+#include "../common/json_string.h"
 #include "widget_renderer.h"
 
 #include <cstdarg>
@@ -1036,10 +1037,11 @@ wux::FrameworkElement MakeTaskbarWidgetsWidgetRoot(const WidgetInstanceRuntime& 
     root.Height(36);
     root.Width(184);
     root.Margin(wux::ThicknessHelper::FromLengths(6, 0, 6, 0));
-    // A Grid without a background is hit-testable only over painted children.
-    // Keep the whole widget rectangle interactive so Codex hover expansion
-    // starts anywhere inside its declared hitbox, not only over text/bars.
-    root.Background(MakeBrush(0x00, 0x00, 0x00, 0x00));
+    // WinUI can optimize a fully transparent brush out of hit testing. A
+    // practically invisible alpha keeps the entire declared widget rectangle
+    // interactive instead of limiting hover to painted text and progress bars.
+    root.IsHitTestVisible(true);
+    root.Background(MakeBrush(0x01, 0x00, 0x00, 0x00));
 
     wuxc::Grid compact;
     compact.Name(L"TaskbarWidgetsCompactPanel");
@@ -1305,68 +1307,9 @@ bool WriteUtf8File(const std::wstring& path, const std::string& data) {
 bool ExtractJsonString(const std::string& json,
                        const char* key,
                        std::wstring& value) {
-    std::string pattern = "\"";
-    pattern += key;
-    pattern += "\":";
-
-    size_t keyPos = json.find(pattern);
-    if (keyPos == std::string::npos) {
-        return false;
-    }
-
-    size_t start = json.find_first_not_of(" \t\r\n", keyPos + pattern.size());
-    if (start == std::string::npos || json[start] != '"') {
-        return false;
-    }
-    ++start;
-
-    size_t end = start;
-    bool escaped = false;
-    while (end < json.size()) {
-        char ch = json[end];
-        if (!escaped && ch == '"') {
-            break;
-        }
-
-        escaped = !escaped && ch == '\\';
-        if (ch != '\\') {
-            escaped = false;
-        }
-        ++end;
-    }
-
-    if (end >= json.size()) {
-        return false;
-    }
-
-    std::string raw = json.substr(start, end - start);
     std::string decoded;
-    decoded.reserve(raw.size());
-    for (size_t i = 0; i < raw.size(); ++i) {
-        if (raw[i] == '\\' && i + 1 < raw.size()) {
-            char next = raw[++i];
-            switch (next) {
-                case '\\':
-                case '"':
-                case '/':
-                    decoded += next;
-                    break;
-                case 'n':
-                    decoded += '\n';
-                    break;
-                case 'r':
-                    decoded += '\r';
-                    break;
-                case 't':
-                    decoded += '\t';
-                    break;
-                default:
-                    decoded += next;
-                    break;
-            }
-        } else {
-            decoded += raw[i];
-        }
+    if (!taskbar_widgets::json::ExtractStringUtf8(json, key, decoded)) {
+        return false;
     }
 
     int wideLength = MultiByteToWideChar(CP_UTF8, 0, decoded.c_str(),
