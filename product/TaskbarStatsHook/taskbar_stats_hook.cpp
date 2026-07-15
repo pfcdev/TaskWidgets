@@ -3951,6 +3951,7 @@ void SetMediaTitleText(wux::UIElement const& root, const std::wstring& text) {
     constexpr double viewportWidth = 112.0;
     constexpr double averageCharWidth = 6.2;
     constexpr double separatorWidth = 18.0;
+    constexpr double pixelsPerSecond = 18.0;
     const std::wstring separator = L"  •";
 
     double textWidth = static_cast<double>(value.size()) * averageCharWidth;
@@ -3983,6 +3984,17 @@ void SetMediaTitleText(wux::UIElement const& root, const std::wstring& text) {
     }
     first.Width(itemWidth);
     second.Width(itemWidth);
+
+    auto transform =
+        marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
+    if (!transform) {
+        transform = wuxm::TranslateTransform();
+        marqueeElement.RenderTransform(transform);
+    }
+
+    double elapsed = static_cast<double>(CurrentUnixMillis() % 600000LL) / 1000.0;
+    double offset = std::fmod(elapsed * pixelsPerSecond, itemWidth);
+    transform.X(-offset);
 }
 
 void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
@@ -4002,6 +4014,7 @@ void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
     constexpr double viewportWidth = 93.0;
     constexpr double averageCharWidth = 6.2;
     constexpr double separatorWidth = 18.0;
+    constexpr double pixelsPerSecond = 18.0;
     const std::wstring separator = L"  •";
 
     double textWidth = static_cast<double>(value.size()) * averageCharWidth;
@@ -4034,31 +4047,6 @@ void SetSteamTitleText(wux::UIElement const& root, const std::wstring& text) {
     }
     first.Width(itemWidth);
     second.Width(itemWidth);
-}
-
-void UpdateScrollingTitleAnimation(wux::FrameworkElement const& marqueeElement,
-                                   wuxc::TextBlock const& first,
-                                   wuxc::TextBlock const& second,
-                                   double viewportWidth,
-                                   double pixelsPerSecond,
-                                   double deltaSeconds) {
-    if (!marqueeElement || !first || !second || second.Text().empty()) {
-        return;
-    }
-
-    constexpr double averageCharWidth = 6.2;
-    double itemWidth = static_cast<double>(first.Text().size()) * averageCharWidth;
-    if (!std::isfinite(itemWidth) || itemWidth <= viewportWidth) {
-        itemWidth = first.Width();
-    }
-    if (!std::isfinite(itemWidth) || itemWidth <= viewportWidth) {
-        auto transform =
-            marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
-        if (transform) {
-            transform.X(0);
-        }
-        return;
-    }
 
     auto transform =
         marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
@@ -4067,30 +4055,9 @@ void UpdateScrollingTitleAnimation(wux::FrameworkElement const& marqueeElement,
         marqueeElement.RenderTransform(transform);
     }
 
-    double offset = -transform.X();
-    if (!std::isfinite(offset) || offset < 0) {
-        offset = 0;
-    }
-    offset = std::fmod(offset + (pixelsPerSecond * deltaSeconds), itemWidth);
+    double elapsed = static_cast<double>(CurrentUnixMillis() % 600000LL) / 1000.0;
+    double offset = std::fmod(elapsed * pixelsPerSecond, itemWidth);
     transform.X(-offset);
-}
-
-void UpdateTaskbarStatsAnimations(wux::UIElement const& root,
-                                  double deltaSeconds) {
-    UpdateScrollingTitleAnimation(
-        FindNamedFrameworkElement(root, L"TaskbarStatsMediaTitleMarquee"),
-        FindNamedTextBlock(root, L"TaskbarStatsMediaTitle"),
-        FindNamedTextBlock(root, L"TaskbarStatsMediaTitleClone"),
-        112.0,
-        18.0,
-        deltaSeconds);
-    UpdateScrollingTitleAnimation(
-        FindNamedFrameworkElement(root, L"TaskbarStatsSteamTitleMarquee"),
-        FindNamedTextBlock(root, L"TaskbarStatsSteamTitle"),
-        FindNamedTextBlock(root, L"TaskbarStatsSteamTitleClone"),
-        93.0,
-        18.0,
-        deltaSeconds);
 }
 
 void SetNamedTextColor(wux::UIElement const& root,
@@ -5119,33 +5086,13 @@ wux::DispatcherTimer StartTaskbarStatsTimer(wux::UIElement const& root,
                                             wux::FrameworkElement const& trayElement) {
     wux::DispatcherTimer timer;
     timer.Interval(std::chrono::milliseconds(33));
-    timer.Tick([root, parent, trayElement,
-                lastAnchorUpdate = CurrentUnixMillis(),
-                lastDataUpdate = CurrentUnixMillis(),
-                lastAnimationUpdate = CurrentUnixMillis()](auto const&, auto const&) mutable {
+    timer.Tick([root, parent, trayElement](auto const&, auto const&) {
         try {
-            long long now = CurrentUnixMillis();
-            double animationDeltaSeconds =
-                static_cast<double>(now - lastAnimationUpdate) / 1000.0;
-            if (!std::isfinite(animationDeltaSeconds) ||
-                animationDeltaSeconds <= 0) {
-                animationDeltaSeconds = 1.0 / 30.0;
-            }
-            animationDeltaSeconds = std::min(animationDeltaSeconds, 0.1);
-            lastAnimationUpdate = now;
-
             auto rootElement = root.try_as<wux::FrameworkElement>();
-            if (rootElement && parent && trayElement &&
-                now - lastAnchorUpdate >= 250) {
+            if (rootElement && parent && trayElement) {
                 ApplyTaskbarStatsAnchorMargin(rootElement, parent, trayElement);
-                lastAnchorUpdate = now;
             }
-
-            if (now - lastDataUpdate >= 500) {
-                UpdateTaskbarStatsRoot(root);
-                lastDataUpdate = now;
-            }
-            UpdateTaskbarStatsAnimations(root, animationDeltaSeconds);
+            UpdateTaskbarStatsRoot(root);
         } catch (winrt::hresult_error const& ex) {
             Wh_Log(L"TaskbarStats update failed: 0x%08X %s", ex.code(),
                    ex.message().c_str());
