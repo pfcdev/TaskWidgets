@@ -4069,8 +4069,12 @@ void UpdateScrollingTitleAnimation(wux::FrameworkElement const& marqueeElement,
         return;
     }
 
-    double itemWidth = first.Width();
-    if (itemWidth <= viewportWidth) {
+    constexpr double averageCharWidth = 6.2;
+    double itemWidth = static_cast<double>(first.Text().size()) * averageCharWidth;
+    if (!std::isfinite(itemWidth) || itemWidth <= viewportWidth) {
+        itemWidth = first.Width();
+    }
+    if (!std::isfinite(itemWidth) || itemWidth <= viewportWidth) {
         auto transform =
             marqueeElement.RenderTransform().try_as<wuxm::TranslateTransform>();
         if (transform) {
