@@ -89,26 +89,21 @@ current cover art. These clips are cropped directly from a live taskbar session:
 <table>
   <tr>
     <td align="center" width="33%">
-      <img src="assets/readme/media-dynamic/media-christmas-song.gif" alt="Media Player adapting to The Christmas Song cover art" /><br />
-      <sub>The Christmas Song</sub>
+      <img src="assets/readme/media-dynamic/media-palette-01.gif" alt="Media Player dynamic color palette variation 1" />
     </td>
     <td align="center" width="33%">
-      <img src="assets/readme/media-dynamic/media-want-for-christmas.gif" alt="Media Player adapting to All I Want for Christmas Is You cover art" /><br />
-      <sub>All I Want for Christmas Is You</sub>
+      <img src="assets/readme/media-dynamic/media-palette-02.gif" alt="Media Player dynamic color palette variation 2" />
     </td>
     <td align="center" width="33%">
-      <img src="assets/readme/media-dynamic/media-carol-of-the-bells.gif" alt="Media Player adapting to Carol of the Bells cover art" /><br />
-      <sub>Carol of the Bells</sub>
+      <img src="assets/readme/media-dynamic/media-palette-03.gif" alt="Media Player dynamic color palette variation 3" />
     </td>
   </tr>
   <tr>
     <td align="center" width="50%" colspan="1">
-      <img src="assets/readme/media-dynamic/media-holly-ivy-evergreen.gif" alt="Media Player adapting to Holly, Ivy and Evergreen cover art" /><br />
-      <sub>Holly, Ivy &amp; Evergreen</sub>
+      <img src="assets/readme/media-dynamic/media-palette-04.gif" alt="Media Player dynamic color palette variation 4" />
     </td>
     <td align="center" width="50%" colspan="2">
-      <img src="assets/readme/media-dynamic/media-christmas-coffee.gif" alt="Media Player adapting to Christmas Coffee cover art" /><br />
-      <sub>Christmas Coffee</sub>
+      <img src="assets/readme/media-dynamic/media-palette-05.gif" alt="Media Player dynamic color palette variation 5" />
     </td>
   </tr>
 </table>
